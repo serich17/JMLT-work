@@ -50,14 +50,14 @@ else:
     cols_selected = st.multiselect(
         "Select which columns to show in table",
         st.session_state.project.collect_schema().names(),
-        default=["Original", "Country"]
+        default=["Original", "To_analyze"]
     )
 
     filtered = filter_prefix(st.session_state.project, option, start)
 
     edited_df = st.data_editor(
         filtered\
-        .filter(pl.col("Flagged")==1).unique(["Country"]).select(cols_selected).collect(engine="streaming"),
+        .filter(pl.col("Flagged")==1).unique(["To_analyze"]).select(cols_selected).collect(engine="streaming"),
         width="stretch",
         key="editor"
     )

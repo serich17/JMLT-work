@@ -5,7 +5,7 @@ import re
 import streamlit as st
 from data import Progress
 from rapidfuzz.process import cdist
-from rapidfuzz.distance import DamerauLevenshtein
+from rapidfuzz.distance import DamerauLevenshtein, Levenshtein
 import numpy as np
 
 # Root directory where projects are stored
@@ -20,7 +20,7 @@ def load_progress(project_path):
         pro = pickle.load(f)
 
     try:
-        country = float(pro.get_country()/pro.get_size()[1]/100)
+        country = float(pro.get_flagged()/pro.get_size()[1]/100)
         # region = float(pro.get_region())
         # value = (country + region) / 2
     except (TypeError, ValueError):
@@ -37,25 +37,31 @@ def preprocess(file, file_stem):
             .with_columns(
                 pl.col("Location Original Text").map_elements(
                     lambda x: re.compile(r"^((?:[^,]+,\s*)*[^,]+)(?:,\s*\1)+$").sub(r"\1", x) if x is not None else None, return_dtype=pl.Utf8
-                    ),
-                pl.col("Location Original Text").str.replace_all(r"\s*,\s*", ",").str.split(",").alias("loc_array")
+                    ).alias("Preprocess")
                 )\
-            .select([
-                pl.col("Index"),
-                pl.col("Folder Name").alias("Folder"),
-                pl.col("Location Original Text").alias("Original"),
-                pl.col("loc_array").list.get(pl.lit(-4), null_on_oob=True).alias("Village"),
-                pl.col("loc_array").list.get(pl.lit(-3), null_on_oob=True).alias("District"),
-                pl.col("loc_array").list.get(pl.lit(-2), null_on_oob=True).alias("Region"),
-                pl.col("loc_array").list.get(pl.lit(-1), null_on_oob=True).alias("Country")
-            ])\
+            .with_columns(pl.col("Preprocess").str.replace_all(r"\s*,\s*", ",").str.split(",").alias("split"))\
             .with_columns(
-                pl.col("Village").str.replace_all(r"[^\p{L}\s]", "").str.strip_chars().str.to_titlecase(),
-                pl.col("District").str.replace_all(r"[^\p{L}\s]", "").str.strip_chars().str.to_titlecase(),
-                pl.col("Region").str.replace_all(r"[^\p{L}\s]", "").str.strip_chars().str.to_titlecase(),
-                pl.col("Country").str.replace_all(r"[^\p{L}\s]", "").str.strip_chars().str.to_titlecase(),
-                pl.lit(0).alias("Flagged")
+                # if split array is = 1 split by space
+                pl.when(pl.col("split").list.len() == 1)
+                .then(pl.col("split").list.first().str.split(r"\s+"))
+                .otherwise(pl.col("split"))
+                .alias("Separated")
+            ).drop("split")\
+            .with_columns(
+                # drop duplicates, ignoring case
+                pl.col("Separated")
+                .list.eval(pl.element().str.to_titlecase())
+                .list.unique(maintain_order=True)
+                .alias("Separated")
+            )\
+            .with_columns(
+                # create flagged column
+                pl.col("Separated").list.get(-1, null_on_oob=True).alias("To_analyze"),
+                pl.lit(0).alias("Flagged"),
+                pl.lit([]).alias("Analyzed"),
+                pl.lit(-1).alias("Current_index")
             )
+        df = df.rename({"Location Original Text": "Original"})
 
         # Create subdirectory and save new project inside
         if not file_stem:
@@ -72,7 +78,6 @@ def preprocess(file, file_stem):
         
         country_check(dir_name)
 
-        # st.table(df.head())
         
     except Exception as e:
         print("Error in Preprocessing")
@@ -180,30 +185,49 @@ def country_check(dir_name):
 
         print("Country count: ", co.count())
 
+        co_map = {name.lower(): name for name in co["all_names"] if name is not None}
 
         df = df.with_columns(
-            pl.when(~pl.col("Country").is_in(co["all_names"]))
+            pl.when(pl.col("To_analyze").is_not_null() & ~pl.col("To_analyze").str.to_lowercase().is_in(co_map.keys()))
             .then(1)
             .otherwise(0)
-            .alias("Flagged")
-        ).collect()
+            .alias("Flagged"),
+            pl.col("Separated").list.slice(0, pl.col("Separated").list.len() - 1).alias("Separated"),
+            pl.col("To_analyze")\
+            .str.to_lowercase()\
+            .replace(co_map, default=pl.col("To_analyze")).alias("To_analyze")
+        )\
+        .collect()
+        # .with_columns(
+        #         Analyzed = pl.when(pl.col("Flagged") == 0)
+        #             .then(
+        #                 pl.concat_list([
+        #                     pl.col("To_analyze").cast(pl.List(pl.Utf8)), 
+        #                     pl.col("Analyzed").fill_null([])
+        #                 ])
+        #             )
+        #             .otherwise(pl.col("Analyzed"))
+        #     )\
+        # .collect()
 
 
         flagged_df = (
             df.filter(pl.col("Flagged") == 1)
-            .select("Country")
+            .select("To_analyze")
             .unique()
         )
 
-        queries = flagged_df["Country"].to_list()
+        queries = flagged_df["To_analyze"].to_list()
         choices = co["all_names"].to_list()
 
+        print (f"Queries {len(queries)}, Choices {len(choices)}")
+
         if queries:
-            mat = cdist(queries, choices, score_cutoff=.75, scorer=DamerauLevenshtein.normalized_similarity, workers=-1)
+            mat = cdist(queries, choices, score_cutoff=.75, scorer=Levenshtein.normalized_similarity, workers=-1)
             max_idx = mat.argmax(axis=1)
             max_score = mat.max(axis=1)
             best_matches = pl.DataFrame({
-                "Country": queries,
+                "To_analyze": queries,
                 "Suggested_Raw": [choices[i] for i in max_idx],
                 "MatchScore": max_score,
             })
@@ -215,76 +239,14 @@ def country_check(dir_name):
                 .alias("Suggested")
             ).drop("Suggested_Raw")
 
-            df = df.join(best_matches, on="Country", how="left")
+            print("HERE")
+
+            df = df.join(best_matches, on="To_analyze", how="left")
         else:
             df = df.with_columns([
                 pl.lit(None).alias("Suggested"),
                 pl.lit(0.0).alias("MatchScore")
             ])
-
-
-        # trying to go through all the values that didn't find a match and put the single values in the next column over and split the other
-        # values by space then put them in their columns
-        df = df\
-            .with_columns(
-                pl.when((pl.col("Flagged") == 1) & (pl.col("MatchScore") == 0))
-                .then(pl.col("Original").str.split(" "))
-                .otherwise(None)
-                .alias("loc_array")
-            )\
-            .with_columns(
-                pl.when(pl.col("loc_array").is_not_null())
-                .then(pl.when(pl.col("loc_array").list.len() == 1)
-                      .then(pl.col("loc_array").list.get(pl.lit(-1), null_on_oob=True))
-                      .otherwise(pl.col("loc_array").list.get(pl.lit(-2), null_on_oob=True)))
-                .otherwise(pl.col("Region")).alias("Region"),
-
-                pl.when(pl.col("loc_array").is_not_null())
-                .then(pl.when(pl.col("loc_array").list.len() > 1)
-                      .then(pl.col("loc_array").list.get(pl.lit(-1), null_on_oob=True))
-                      .otherwise(None))
-                .otherwise(pl.col("Country")).alias("Country"),
-
-                pl.when(pl.col("loc_array").is_not_null())
-                .then(pl.when(pl.col("loc_array").list.len() > 2)
-                      .then(pl.col("loc_array").list.get(pl.lit(-3), null_on_oob=True))
-                      .otherwise(None))
-                .otherwise(pl.col("District")).alias("District"),
-
-                pl.when(pl.col("loc_array").is_not_null())
-                .then(pl.when(pl.col("loc_array").list.len() > 3)
-                      .then(pl.col("loc_array").list.get(pl.lit(-4), null_on_oob=True))
-                      .otherwise(None))
-                .otherwise(pl.col("Village")).alias("Village")
-            ).with_columns(pl.when(pl.col("Flagged").is_null()).then(pl.lit(0)).otherwise(pl.col("Flagged")))
-        
-
-        flagged_df = (
-            df.filter((pl.col("Flagged") == 1) & (pl.col("Country").is_not_null()) & (pl.col("MatchScore") == 0))
-            .select("Country")
-            .unique()
-        )
-
-        queries = flagged_df["Country"].to_list()
-
-        if queries:
-            mat = cdist(queries, choices, score_cutoff=.75, scorer=DamerauLevenshtein.normalized_similarity, workers=-1)
-            max_idx = mat.argmax(axis=1)
-            max_score = mat.max(axis=1)
-            best_matches = pl.DataFrame({
-                "Country": queries,
-                "Suggested_Raw": [choices[i] for i in max_idx],
-                "MatchScore": max_score,
-            })
-
-            best_matches = best_matches.with_columns(
-                pl.when(pl.col("MatchScore") >= 0.75)
-                .then(pl.col("Suggested_Raw"))
-                .otherwise(None)
-                .alias("Suggested")
-            ).drop("Suggested_Raw")
-
-            df = df.join(best_matches, on="Country", how="left")
 
 
 
@@ -293,17 +255,15 @@ def country_check(dir_name):
         with open(f"{dir_name}/progress.pkl", "rb") as f:
             progress = pickle.load(f)
 
-        num = df.unique(["Country"]).select(pl.col("Flagged").sum()).item()
-        progress.set_country(
+        num = df.unique(["To_analyze"]).select(pl.col("Flagged").sum()).item()
+        progress.set_unique_flagged(
             num
         )
+        progress.set_flagged(df.select(pl.col("Flagged").sum()).item())
 
         with open(f"{dir_name}/progress.pkl", "wb") as f:
             pickle.dump(progress, f)
         
-        # print("COUNTRY PRINTED", progress.get_country())
-        # print("NUM", num)
-        # st.dataframe(df.show(5))
     except Exception as e:
         print(e)
 
@@ -345,9 +305,6 @@ def filter_prefix(lf: pl.LazyFrame, column: str, prefix: str) -> pl.DataFrame:
         )
     else:
         return lf
-
-
-
 
 
 
