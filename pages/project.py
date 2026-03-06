@@ -57,10 +57,16 @@ else:
 
     edited_df = st.data_editor(
         filtered\
-        .filter(pl.col("Flagged")==1).unique(["To_analyze"]).select(cols_selected).collect(engine="streaming"),
+        .filter(pl.col("Flagged")==1).unique(["To_analyze"]).collect(engine="streaming"),
         width="stretch",
-        key="editor"
+        key="editor",
+        column_order= cols_selected
     )
+
+    # num_rows = "delete"
+    # column_order =("one", "two")
+    # column_config = {"col1":"Col 1"}
+    # disabled=[cols that you can't edit]
 
 
 

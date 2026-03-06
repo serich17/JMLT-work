@@ -69,15 +69,3 @@ if uploaded_file:
 else:
     st.session_state.file_active = False
     st.info("Please upload a file to begin")
-
-
-
-
-# if DATA_CONNECTED:
-#     df = pl.scan_parquet("allCountries.parquet/**/*.parquet")\
-#         .filter(pl.col("name_lower").str.starts_with("sant "))\
-#         # .sort(by=["name_lower"], descending=True)
-
-#     df.show(20)
-#     st.title("Data Connected")
-#     st.write("Let's gooo!")

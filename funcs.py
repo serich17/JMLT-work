@@ -32,20 +32,49 @@ def load_progress(project_path):
 
 def preprocess(file, file_stem):
     try:
+        co = st.session_state.countries
+        country_pattern = ""
+        for c in co:
+            country_pattern += f"|{c}"
+
         df = pl.read_csv(file)\
             .with_row_index("Index")\
             .with_columns(
                 pl.col("Location Original Text").map_elements(
-                    lambda x: re.compile(r"^((?:[^,]+,\s*)*[^,]+)(?:,\s*\1)+$").sub(r"\1", x) if x is not None else None, return_dtype=pl.Utf8
+                    lambda x: re.compile(r"^((?:[^,]+,\s*)*[^,]+)(?:,\s*\1)+$").sub(r"\1", x) if x is not None else None, return_dtype=pl.Utf8 # if the whole string repeats itself twice, replace with first match
                     ).alias("Preprocess")
                 )\
-            .with_columns(pl.col("Preprocess").str.replace_all(r"\s*,\s*", ",").str.split(",").alias("split"))\
+            .with_columns(pl.col("Preprocess").str.replace_all(r"(\b[a-zA-Z\s]{5,}\b),\s+(\1)(?!,)", r"$1,").alias("Preprocess") # if a word repeats itself, but the second match doesn't have a comma, replace the whole thing with the first
+                          )\
             .with_columns(
-                # if split array is = 1 split by space
+                pl.col("Preprocess").str.replace_all(rf"(?i)(^|[^,\s])\s*({country_pattern})$", r"$1, $2") # if one of the countries is on the end of the string, add a comma beforehand
+            )\
+            .with_columns(pl.col("Preprocess").str.replace_all(r"\s*,\s*", ",").str.replace_all(r"(?i)(?:\.(?![a-z]\s)|(?<=\.[a-z])\s)(?=[^.]{3,}(?:\.|$))", r",").str.split(",").alias("split") # replace all periods that have three or more characters inbetween with a comma, then split into an array
+                          )\
+            .with_columns(
+                # if split array is = 1 split by space or title case
                 pl.when(pl.col("split").list.len() == 1)
-                .then(pl.col("split").list.first().str.split(r"\s+"))
-                .otherwise(pl.col("split"))
-                .alias("Separated")
+                    .then(
+                        pl.when(
+                            pl.col("split")
+                            .list.first()
+                            .str.contains(r"[a-z][A-Z]")
+                        )
+                        .then(
+                            pl.col("split")
+                            .list.first()
+                            .str.replace_all(r"\s+", "")
+                            .str.replace_all(r"([a-z])([A-Z])", r"$1,$2")
+                            .str.split(",")
+                        )
+                        .otherwise(
+                            pl.col("split")
+                            .list.first()
+                            .str.split(r"\s+")
+                        )
+                    )
+                    .otherwise(pl.col("split"))
+                    .alias("Separated")
             ).drop("split")\
             .with_columns(
                 # drop duplicates, ignoring case
@@ -60,7 +89,8 @@ def preprocess(file, file_stem):
                 pl.lit(0).alias("Flagged"),
                 pl.lit([]).alias("Analyzed"),
                 pl.lit(-1).alias("Current_index")
-            )
+            )\
+            .with_columns(pl.col("Separated").str.replace_all(r"(?i)\b([A-Za-z ]{3,}?)\s*(?:(?<=\S)\s*)\1\b", r"${1}"))
         df = df.rename({"Location Original Text": "Original"})
 
         # Create subdirectory and save new project inside
@@ -177,6 +207,8 @@ def clickable_card(title, progress, target_page):
 
 def country_check(dir_name):
     try:
+        # USING 2000 alternate name file instead 
+
         df = pl.scan_parquet(f"{dir_name}/processed_data.parquet")
         # co = pl.read_parquet("country.parquet/**/*.parquet")
 
@@ -185,7 +217,7 @@ def country_check(dir_name):
 
         print("Country count: ", co.count())
 
-        co_map = {name.lower(): name for name in co["all_names"] if name is not None}
+        co_map = {name.lower(): name for name in co["alternateName"] if name is not None}
 
         df = df.with_columns(
             pl.when(pl.col("To_analyze").is_not_null() & ~pl.col("To_analyze").str.to_lowercase().is_in(co_map.keys()))
@@ -218,12 +250,12 @@ def country_check(dir_name):
         )
 
         queries = flagged_df["To_analyze"].to_list()
-        choices = co["all_names"].to_list()
+        choices = co["alternateName"].to_list()
 
         print (f"Queries {len(queries)}, Choices {len(choices)}")
 
         if queries:
-            mat = cdist(queries, choices, score_cutoff=.75, scorer=Levenshtein.normalized_similarity, workers=-1)
+            mat = cdist(queries, choices, scorer=Levenshtein.normalized_similarity, workers=-1, scorer_kwargs={"weights":(3,1,5)})
             max_idx = mat.argmax(axis=1)
             max_score = mat.max(axis=1)
             best_matches = pl.DataFrame({
@@ -233,7 +265,7 @@ def country_check(dir_name):
             })
 
             best_matches = best_matches.with_columns(
-                pl.when(pl.col("MatchScore") >= 0.75)
+                pl.when(pl.col("MatchScore") >= 0)
                 .then(pl.col("Suggested_Raw"))
                 .otherwise(None)
                 .alias("Suggested")
@@ -268,21 +300,26 @@ def country_check(dir_name):
         print(e)
 
 
+# @st.cache_resource
+# def load_countries():
+#     if "allPlaces" not in st.session_state:
+#         st.session_state.allPlaces = load_places()
+#     return st.session_state.allPlaces\
+#             .filter(pl.col("feature_code").str.contains("PCL"))\
+#             .with_columns(
+#                 all_names = pl.concat_list(
+#                     pl.col("name"),
+#                     pl.col("asciiname"),
+#                     pl.col("alternatenames").str.split(",")
+#                 ).list.unique()
+#             )\
+#             .explode("all_names")\
+#             .collect()
+
 @st.cache_resource
 def load_countries():
-    if "allPlaces" not in st.session_state:
-        st.session_state.allPlaces = load_places()
-    return st.session_state.allPlaces\
-            .filter(pl.col("feature_code").str.contains("PCL"))\
-            .with_columns(
-                all_names = pl.concat_list(
-                    pl.col("name"),
-                    pl.col("asciiname"),
-                    pl.col("alternatenames").str.split(",")
-                ).list.unique()
-            )\
-            .explode("all_names")\
-            .collect()
+    return pl.scan_parquet("colonialCountries/*/*.parquet").collect()
+
 
 
 @st.cache_resource
