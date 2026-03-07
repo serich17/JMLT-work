@@ -93,7 +93,7 @@ def preprocess(file, file_stem):
             .with_columns(
                 # drop duplicates, ignoring case
                 pl.col("Separated")
-                .list.eval(pl.element().str.to_titlecase())
+                .list.eval(pl.element().str.to_titlecase().filter(pl.element() != ""))
                 .list.unique(maintain_order=True)
                 .alias("Separated")
             )\
@@ -238,7 +238,7 @@ def country_check(dir_name):
             .then(1)
             .otherwise(0)
             .alias("Flagged"),
-            pl.col("Separated").list.slice(0, pl.col("Separated").list.len() - 1).alias("Separated"),
+            pl.col("Separated").list.slice(0, pl.col("Separated").list.len() - 1).alias("Separated"), # remove the last item from the list
             pl.col("To_analyze")\
             .str.to_lowercase()\
             .replace(co_map, default=pl.col("To_analyze")).alias("To_analyze")

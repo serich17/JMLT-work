@@ -57,7 +57,7 @@ else:
 
     edited_df = st.data_editor(
         filtered\
-        .head(1000).collect(engine="streaming"),
+        .filter(~pl.col("Preprocess").str.contains(",") & pl.col("Preprocess").str.contains(" ")).collect(engine="streaming"),
         width="stretch",
         key="editor",
         column_order= cols_selected
