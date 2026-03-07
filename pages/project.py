@@ -57,7 +57,7 @@ else:
 
     edited_df = st.data_editor(
         filtered\
-        .filter(pl.col("Flagged")==1).unique(["To_analyze"]).collect(engine="streaming"),
+        .head(1000).collect(engine="streaming"),
         width="stretch",
         key="editor",
         column_order= cols_selected
@@ -68,6 +68,8 @@ else:
     # column_config = {"col1":"Col 1"}
     # disabled=[cols that you can't edit]
 
+    print(filtered\
+        .filter(pl.col("Flagged")==1).unique(["To_analyze"]).filter(pl.col("Separated").list.len() > 1).collect(engine="streaming").describe())
 
 
     # df = st.session_state["allPlaces"]

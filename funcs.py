@@ -32,24 +32,38 @@ def load_progress(project_path):
 
 def preprocess(file, file_stem):
     try:
-        co = st.session_state.countries
+        co = st.session_state.countries["alternateName"].to_list()
         country_pattern = ""
         for c in co:
             country_pattern += f"|{c}"
+        country_pattern = country_pattern[1:]
+
+        pat_full_repeat = re.compile(r"^((?:[^,]+,\s*)*[^,]+)(?:,\s*\1)+$", re.I) # if the whole string repeats itself twice, replace with first match
+        pat_phrase_repeat = re.compile(r"(\b[a-zA-Z\s]{5,}\b),\s+(\1)(?!,)", re.I) # if a word repeats itself, but the second match doesn't have a comma, replace the whole thing with the first
+        pat_period = re.compile(r"(?i)(?:\.(?![a-z]\s)|(?<=\.[a-z])\s)(?=[^.]{3,}(?:\.|$))") # replace all periods that have three or more characters inbetween with a comma
 
         df = pl.read_csv(file)\
             .with_row_index("Index")\
             .with_columns(
-                pl.col("Location Original Text").map_elements(
-                    lambda x: re.compile(r"^((?:[^,]+,\s*)*[^,]+)(?:,\s*\1)+$").sub(r"\1", x) if x is not None else None, return_dtype=pl.Utf8 # if the whole string repeats itself twice, replace with first match
-                    ).alias("Preprocess")
-                )\
-            .with_columns(pl.col("Preprocess").str.replace_all(r"(\b[a-zA-Z\s]{5,}\b),\s+(\1)(?!,)", r"$1,").alias("Preprocess") # if a word repeats itself, but the second match doesn't have a comma, replace the whole thing with the first
-                          )\
+                pl.col("Location Original Text")
+                .map_elements(
+                    lambda x: (
+                        pat_period.sub(
+                            ",",
+                        pat_phrase_repeat.sub(
+                            r"\1,",
+                            pat_full_repeat.sub(r"\1", x)
+                        )
+                        ) if x is not None else None
+                    ),
+                    return_dtype=pl.Utf8
+                )
+                .alias("Preprocess")
+            )\
             .with_columns(
                 pl.col("Preprocess").str.replace_all(rf"(?i)(^|[^,\s])\s*({country_pattern})$", r"$1, $2") # if one of the countries is on the end of the string, add a comma beforehand
             )\
-            .with_columns(pl.col("Preprocess").str.replace_all(r"\s*,\s*", ",").str.replace_all(r"(?i)(?:\.(?![a-z]\s)|(?<=\.[a-z])\s)(?=[^.]{3,}(?:\.|$))", r",").str.split(",").alias("split") # replace all periods that have three or more characters inbetween with a comma, then split into an array
+            .with_columns(pl.col("Preprocess").str.replace_all(r"\s*,\s*", ",").str.split(",").alias("split") #, then split into an array
                           )\
             .with_columns(
                 # if split array is = 1 split by space or title case
@@ -90,7 +104,7 @@ def preprocess(file, file_stem):
                 pl.lit([]).alias("Analyzed"),
                 pl.lit(-1).alias("Current_index")
             )\
-            .with_columns(pl.col("Separated").str.replace_all(r"(?i)\b([A-Za-z ]{3,}?)\s*(?:(?<=\S)\s*)\1\b", r"${1}"))
+            # .with_columns(pl.col("To_analyze").str.replace_all(r"(?i)\b([A-Za-z ]{3,}?)\s*(?:(?<=\S)\s*)\1\b", r"${1}")).alias("To_analyze")
         df = df.rename({"Location Original Text": "Original"})
 
         # Create subdirectory and save new project inside
@@ -229,18 +243,19 @@ def country_check(dir_name):
             .str.to_lowercase()\
             .replace(co_map, default=pl.col("To_analyze")).alias("To_analyze")
         )\
+        .with_columns(
+                Analyzed = pl.when(pl.col("Flagged") == 0)
+                    .then(
+                        pl.concat_list([
+                            pl.col("To_analyze").cast(pl.List(pl.Utf8)), 
+                            pl.col("Analyzed").fill_null([])
+                        ])
+                    )
+                    .otherwise(pl.col("Analyzed")),
+                To_analyze = pl.when(pl.col("Flagged") == 0)
+                    .then(None).otherwise(pl.col("To_analyze"))
+            )\
         .collect()
-        # .with_columns(
-        #         Analyzed = pl.when(pl.col("Flagged") == 0)
-        #             .then(
-        #                 pl.concat_list([
-        #                     pl.col("To_analyze").cast(pl.List(pl.Utf8)), 
-        #                     pl.col("Analyzed").fill_null([])
-        #                 ])
-        #             )
-        #             .otherwise(pl.col("Analyzed"))
-        #     )\
-        # .collect()
 
 
         flagged_df = (
