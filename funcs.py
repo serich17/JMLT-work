@@ -5,12 +5,13 @@ import re
 import streamlit as st
 from data import Progress
 from rapidfuzz.process import cdist
-from rapidfuzz.distance import DamerauLevenshtein, Levenshtein
-import numpy as np
+from rapidfuzz.distance import Levenshtein
+import time
+import uuid
 
 # Root directory where projects are stored
 PROJECTS_DIR = f"{os.path.dirname(os.path.abspath(__file__))}/projects"
-
+SAVE_INTERVAL = 180  # seconds
 def load_progress(project_path):
     pkl = os.path.join(PROJECTS_DIR, project_path, "progress.pkl")
     if not os.path.exists(pkl):
@@ -310,7 +311,7 @@ def country_check(dir_name):
 
         with open(f"{dir_name}/progress.pkl", "wb") as f:
             pickle.dump(progress, f)
-        
+
     except Exception as e:
         print(e)
 
@@ -336,7 +337,6 @@ def load_countries():
     return pl.scan_parquet("colonialCountries/*/*.parquet").collect()
 
 
-
 @st.cache_resource
 def load_places():
     return pl.scan_parquet(
@@ -345,19 +345,105 @@ def load_places():
     .filter(pl.col("feature_class").is_in(["P", "A"]))
 
 
-@st.cache_resource
 def load_project(dir: str):
-    return pl.scan_parquet(f"{PROJECTS_DIR}/{dir}/processed_data.parquet")
+    return (pl.scan_parquet(f"{PROJECTS_DIR}/{dir}/processed_data.parquet"))
 
-def filter_prefix(lf: pl.LazyFrame, column: str, prefix: str) -> pl.DataFrame:
+def filter_prefix(lf: pl.LazyFrame, column: str, prefix: str, isUnique: bool, onlyFlagged: bool) -> pl.DataFrame:
     if len(prefix) > 0:
-        return (
-            lf
-            .filter(pl.col(column).str.to_lowercase().str.contains(prefix.lower()))
+        lf = lf.filter(pl.col(column).str.to_lowercase().str.contains(prefix.lower()))
+    if onlyFlagged:
+        lf = lf.filter(pl.col("Flagged") == 1)
+    if isUnique:
+        lf = lf.unique(["To_analyze"])
+    return lf
+
+
+def filter_update(filter_state):
+    option = filter_state[0]
+    start = filter_state[1]
+    isUnique = filter_state[2]
+    onlyFlagged = filter_state[3]
+    if "last_filter_state" not in st.session_state:
+        st.session_state.last_filter_state = None
+    if filter_state != st.session_state.last_filter_state:
+        st.session_state.base_df = filter_prefix(
+            st.session_state.project_df.lazy(),
+            option,
+            start,
+            isUnique,
+            onlyFlagged
+        ).collect(engine="streaming")
+        st.session_state.last_filter_state = filter_state
+
+def update_changed_df(edited_df, projectid):
+    editor_state = st.session_state["editor"]
+    edited_rows = editor_state["edited_rows"]
+    edited_rows = {
+        row_idx: {k: v for k, v in changes.items() if k != "Select"}
+        for row_idx, changes in editor_state["edited_rows"].items()
+    }
+    deleted_rows = editor_state["deleted_rows"]
+    if len(edited_rows) > 0 or len(deleted_rows):
+        df = st.session_state.project_df
+        for row_pos, changes in edited_rows.items():
+            row_id = edited_df[row_pos, "Index"]
+            for col, val in changes.items():
+                df = df.with_columns(
+                    pl.when(pl.col("Index") == row_id)
+                    .then(pl.lit(val))
+                    .otherwise(pl.col(col))
+                    .alias(col)
+                )
+        st.session_state.project_df = df
+        for row_pos in deleted_rows:
+            row_id = edited_df[row_pos, "Index"]
+            df = df.filter(pl.col("Index") != row_id)
+        st.session_state.project_df = df
+        if (time.time() - st.session_state.last_save >= SAVE_INTERVAL):
+            save_file(projectid)
+        st.session_state.editor["edited_rows"] = {}
+        st.session_state.editor["deleted_rows"] = []
+
+        st.session_state.base_df = filter_prefix(
+            st.session_state.project_df.lazy(),
+            st.session_state.last_filter_state[0],
+            st.session_state.last_filter_state[1],
+            st.session_state.last_filter_state[2],
+            st.session_state.last_filter_state[3]
+        ).collect(streaming=True)
+        
+
+def safe_write_parquet(df, path):
+    tmp = path + ".tmp"
+    df.write_parquet(tmp)
+    os.replace(tmp, path)
+
+def save_file(projectid):
+    Lock = st.session_state.lock
+    with Lock:
+        safe_write_parquet(
+            st.session_state.project_df,
+            f"{PROJECTS_DIR}/{projectid}/processed_data.parquet"
         )
-    else:
-        return lf
+    st.session_state.last_save = time.time()
 
 
 
+def options():
+    # Choose what to see
+    key3 = str(uuid.uuid4())
+    key4 = str(uuid.uuid4())
 
+    col1, col2 = st.columns(2)
+    with col1:
+        start = st.text_input("Contains...", key=key3)
+    with col2:
+        search_cols = list(filter(lambda x: x not in ["Index", "Flagged"], st.session_state.project_df.schema.keys()))
+        option = st.selectbox(
+            "Select a column to filter",
+            search_cols,
+            index= search_cols.index("To_analyze"),
+            key=key4
+        )
+            
+    return (option, start)
