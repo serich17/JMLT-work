@@ -118,8 +118,9 @@ def preprocess(file, file_stem):
 
 
         pro = Progress(df.shape, file_stem)
-        with open(f"{dir_name}/progress.pkl", "wb") as f:
-            pickle.dump(pro, f)
+        with st.session_state.lock_class:
+            with open(f"{dir_name}/progress.pkl", "wb") as f:
+                pickle.dump(pro, f)
         
         country_check(dir_name)
 
@@ -300,8 +301,9 @@ def country_check(dir_name):
 
         df.write_parquet(f"{dir_name}/processed_data.parquet")
 
-        with open(f"{dir_name}/progress.pkl", "rb") as f:
-            progress = pickle.load(f)
+        with st.session_state.lock_class:
+            with open(f"{dir_name}/progress.pkl", "rb") as f:
+                progress = pickle.load(f)
 
         num = df.unique(["To_analyze"]).select(pl.col("Flagged").sum()).item()
         progress.set_unique_flagged(
@@ -309,8 +311,9 @@ def country_check(dir_name):
         )
         progress.set_flagged(df.select(pl.col("Flagged").sum()).item())
 
-        with open(f"{dir_name}/progress.pkl", "wb") as f:
-            pickle.dump(progress, f)
+        with st.session_state.lock_class:
+            with open(f"{dir_name}/progress.pkl", "wb") as f:
+                pickle.dump(progress, f)
 
     except Exception as e:
         print(e)
@@ -346,7 +349,10 @@ def load_places():
 
 
 def load_project(dir: str):
-    return (pl.scan_parquet(f"{PROJECTS_DIR}/{dir}/processed_data.parquet"))
+    Lock = st.session_state.lock
+    with Lock:
+        df = (pl.scan_parquet(f"{PROJECTS_DIR}/{dir}/processed_data.parquet"))
+    return df 
 
 def filter_prefix(lf: pl.LazyFrame, column: str, prefix: str, isUnique: bool, onlyFlagged: bool) -> pl.DataFrame:
     if len(prefix) > 0:
@@ -366,8 +372,6 @@ def filter_update(filter_state):
     if "last_filter_state" not in st.session_state:
         st.session_state.last_filter_state = None
     if filter_state != st.session_state.last_filter_state:
-        print(f"filterstate: {filter_state}")
-        print(f"Lastfilterstate: {st.session_state.last_filter_state}")
         st.session_state.base_df = filter_prefix(
             st.session_state.project_df.lazy(),
             option,
@@ -378,6 +382,7 @@ def filter_update(filter_state):
         st.session_state.last_filter_state = filter_state
 
 def update_changed_df(edited_df, projectid):
+    Lock = st.session_state.lock
     editor_state = st.session_state["editor"]
     edited_rows = editor_state["edited_rows"]
     edited_rows = {
@@ -396,23 +401,28 @@ def update_changed_df(edited_df, projectid):
                     .otherwise(pl.col(col))
                     .alias(col)
                 )
-        st.session_state.project_df = df
+        with Lock:
+            df = df.collect(engine="streaming")
+        save_file(df, projectid)
+        st.session_state.project_df = load_project()
         for row_pos in deleted_rows:
             row_id = edited_df[row_pos, "Index"]
             df = df.filter(pl.col("Index") != row_id)
-        st.session_state.project_df = df
+        st.session_state.project_df = df.lazy()
         if (time.time() - st.session_state.last_save >= SAVE_INTERVAL):
             save_file(projectid)
+            st.session_state.project_df = load_project()
         st.session_state.editor["edited_rows"] = {}
         st.session_state.editor["deleted_rows"] = []
 
-        st.session_state.base_df = filter_prefix(
-            st.session_state.project_df.lazy(),
-            st.session_state.last_filter_state[0],
-            st.session_state.last_filter_state[1],
-            st.session_state.last_filter_state[2],
-            st.session_state.last_filter_state[3]
-        ).collect(streaming=True)
+        with Lock:
+            st.session_state.base_df = filter_prefix(
+                st.session_state.project_df,
+                st.session_state.last_filter_state[0],
+                st.session_state.last_filter_state[1],
+                st.session_state.last_filter_state[2],
+                st.session_state.last_filter_state[3]
+            ).collect(streaming=True)
         
 
 def safe_write_parquet(df, path):
@@ -420,14 +430,14 @@ def safe_write_parquet(df, path):
     df.write_parquet(tmp)
     os.replace(tmp, path)
 
-def save_file(projectid):
+def save_file(df, projectid):
     Lock = st.session_state.lock
     with Lock:
         safe_write_parquet(
-            st.session_state.project_df,
+            df,
             f"{PROJECTS_DIR}/{projectid}/processed_data.parquet"
         )
-    st.session_state.last_save = time.time()
+        st.session_state.last_save = time.time()
 
 
 
@@ -440,7 +450,7 @@ def options(keys):
     with col1:
         start = st.text_input("Contains...", key=key3)
     with col2:
-        search_cols = list(filter(lambda x: x not in ["Index", "Flagged"], st.session_state.project_df.schema.keys()))
+        search_cols = list(filter(lambda x: x not in ["Index", "Flagged"], st.session_state.project_df.collect_schema()))
         option = st.selectbox(
             "Select a column to filter",
             search_cols,
@@ -451,64 +461,80 @@ def options(keys):
     return (option, start)
 
 def approve_rows(indexes, change_same, projectid, filter_state, progress):
+    Lock = st.session_state.lock
     df = st.session_state.project_df
 
     base_mask = pl.col("Index").is_in(indexes)
 
     if change_same:
-        vals = (
-            df.filter(base_mask)\
-            .select("To_analyze")
-            .unique()
-            .to_series()
-            .to_list()
-        )
+        with Lock:
+            vals = (
+                df.filter(base_mask)\
+                .select("To_analyze")
+                .unique()
+                .collect()
+                .to_series()
+                .to_list()
+            )
 
         mask = pl.col("To_analyze").is_in(vals)
     else:
         mask = base_mask
 
-    df = df.with_columns(
-        [
-            pl.when(mask)
-            .then(
-                pl.concat_list([
-                    pl.col("Suggested"),
-                    pl.col("Analyzed")
-                ])
-            )
-            .otherwise(pl.col("Analyzed"))
-            .alias("Analyzed"),
+    with Lock:
+        df = df.with_columns(
+            [
+                pl.when(mask)
+                .then(
+                    pl.concat_list([
+                        pl.col("Suggested"),
+                        pl.col("Analyzed")
+                    ])
+                )
+                .otherwise(pl.col("Analyzed"))
+                .alias("Analyzed"),
 
-            pl.when(mask)
-            .then(None)
-            .otherwise(pl.col("To_analyze"))
-            .alias("To_analyze"),
+                pl.when(mask)
+                .then(None)
+                .otherwise(pl.col("To_analyze"))
+                .alias("To_analyze"),
 
-            pl.when(mask)
-            .then(None)
-            .otherwise(pl.col("Suggested"))
-            .alias("Suggested"),
+                pl.when(mask)
+                .then(None)
+                .otherwise(pl.col("Suggested"))
+                .alias("Suggested"),
 
-            pl.when(mask)
-            .then(0)
-            .otherwise(pl.col("Flagged"))
-            .alias("Flagged")
-        ]
-    )
-
-    st.session_state.project_df = df
-    save_file(projectid)
-    st.session_state.base_df = filter_prefix(
-            st.session_state.project_df.lazy(),
-            filter_state[0],
-            filter_state[1],
-            filter_state[2],
-            filter_state[3]
+                pl.when(mask)
+                .then(0)
+                .otherwise(pl.col("Flagged"))
+                .alias("Flagged")
+            ]
         ).collect(engine="streaming")
+
+    save_file(df, projectid)
+    st.session_state.project_df = load_project()
+    with Lock:
+        st.session_state.base_df = filter_prefix(
+                st.session_state.project_df,
+                filter_state[0],
+                filter_state[1],
+                filter_state[2],
+                filter_state[3]
+            ).collect(engine="streaming")
     st.session_state.last_filter_state = filter_state
-    progress.set_flagged(df.filter(pl.col("Flagged") == 1).height)
-    progress.set_unique_flagged(df.filter(pl.col("Flagged") == 1).unique(["To_analyze"]).height)
-    with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "wb") as f:
-        pickle.dump(progress, f)
+
+    with Lock:
+        counts = (
+            df.filter(pl.col("Flagged") == 1)
+            .select(
+                total_flagged=pl.len(),
+                unique_flagged=pl.col("To_analyze").n_unique()
+            )
+            .collect()
+        )
+    progress.set_flagged(counts["total_flagged"][0])
+    progress.set_unique_flagged(counts["unique_flagged"][0])
+    with st.session_state.lock_class:
+        with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "wb") as f:
+            pickle.dump(progress, f)
 

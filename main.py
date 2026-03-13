@@ -8,7 +8,6 @@ from funcs import *
 
 if "allPlaces" not in st.session_state:
     st.session_state.allPlaces = load_places()
-    print(st.session_state.allPlaces.describe())
 
 if "countries" not in st.session_state:
     st.session_state["countries"] = load_countries()
@@ -21,6 +20,8 @@ if "uploader_key" not in st.session_state:
 
 # Root directory where projects are stored
 PROJECTS_DIR = f"{os.path.dirname(os.path.abspath(__file__))}/projects"
+# create the folder projects if it doesn't exist
+os.makedirs(PROJECTS_DIR, exist_ok=True)
 
 
 st.title("Open a Project")
