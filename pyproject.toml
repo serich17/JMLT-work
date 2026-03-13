@@ -9,5 +9,3 @@ dependencies = [
     "rapidfuzz>=3.14.3",
     "streamlit>=1.55.0",
 ]
-[tool.uv.scripts]
-main = "streamlit run main.py"
