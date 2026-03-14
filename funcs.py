@@ -381,7 +381,7 @@ def filter_update(filter_state):
         ).collect(engine="streaming")
         st.session_state.last_filter_state = filter_state
 
-def update_changed_df(projectid):
+def update_changed_df(projectid, change_same, progress):
     Lock = st.session_state.lock
     with st.session_state.save_lock:
         pending = st.session_state.pending_changes
@@ -403,6 +403,11 @@ def update_changed_df(projectid):
         for index_val in deletes:
             df = df.filter(pl.col("Index") != index_val)
 
+        indexes = [
+            index_val for index_val, changes in pending.items()
+            if "To_analyze" in changes
+        ]
+        df = fix_flagged(indexes, df, change_same)
         with Lock:
             df = df.collect(engine="streaming")
         save_file(df, projectid)
@@ -418,7 +423,8 @@ def update_changed_df(projectid):
                 st.session_state.last_filter_state[1],
                 st.session_state.last_filter_state[2],
                 st.session_state.last_filter_state[3]
-            ).collect(streaming=True)        
+            ).collect(streaming=True)
+        update_progress(Lock, progress, projectid, df)
 
 def safe_write_parquet(df, path):
     tmp = path + ".tmp"
@@ -457,8 +463,29 @@ def options(keys):
 
 def approve_rows(indexes, change_same, projectid, filter_state, progress):
     Lock = st.session_state.lock
-    df = st.session_state.project_df
+    df = fix_flagged(indexes, st.session_state.project_df, change_same)
 
+
+    with Lock:
+        df = df.collect(engine="streaming")
+
+    save_file(df, projectid)
+    st.session_state.project_df = load_project(projectid)
+    with Lock:
+        st.session_state.base_df = filter_prefix(
+                st.session_state.project_df,
+                filter_state[0],
+                filter_state[1],
+                filter_state[2],
+                filter_state[3]
+            ).collect(engine="streaming")
+    st.session_state.last_filter_state = filter_state
+
+    update_progress(Lock, progress, projectid, df)
+
+
+def fix_flagged(indexes, df, change_same):
+    Lock = st.session_state.lock
     base_mask = pl.col("Index").is_in(indexes)
 
     if change_same:
@@ -476,48 +503,34 @@ def approve_rows(indexes, change_same, projectid, filter_state, progress):
     else:
         mask = base_mask
 
-    with Lock:
-        df = df.with_columns(
-            [
-                pl.when(mask)
-                .then(
-                    pl.concat_list([
-                        pl.col("Suggested"),
-                        pl.col("Analyzed")
-                    ])
-                )
-                .otherwise(pl.col("Analyzed"))
-                .alias("Analyzed"),
+    df = df.with_columns(
+        [
+            pl.when(mask)
+            .then(
+                pl.concat_list([
+                    pl.col("Suggested"),
+                    pl.col("Analyzed")
+                ])
+            )
+            .otherwise(pl.col("Analyzed"))
+            .alias("Analyzed"),
+            pl.when(mask)
+            .then(None)
+            .otherwise(pl.col("To_analyze"))
+            .alias("To_analyze"),
+            pl.when(mask)
+            .then(None)
+            .otherwise(pl.col("Suggested"))
+            .alias("Suggested"),
+            pl.when(mask)
+            .then(0)
+            .otherwise(pl.col("Flagged"))
+            .alias("Flagged")
+        ]
+    )
+    return df
 
-                pl.when(mask)
-                .then(None)
-                .otherwise(pl.col("To_analyze"))
-                .alias("To_analyze"),
-
-                pl.when(mask)
-                .then(None)
-                .otherwise(pl.col("Suggested"))
-                .alias("Suggested"),
-
-                pl.when(mask)
-                .then(0)
-                .otherwise(pl.col("Flagged"))
-                .alias("Flagged")
-            ]
-        ).collect(engine="streaming")
-
-    save_file(df, projectid)
-    st.session_state.project_df = load_project(projectid)
-    with Lock:
-        st.session_state.base_df = filter_prefix(
-                st.session_state.project_df,
-                filter_state[0],
-                filter_state[1],
-                filter_state[2],
-                filter_state[3]
-            ).collect(engine="streaming")
-    st.session_state.last_filter_state = filter_state
-
+def update_progress(Lock, progress, projectid, df):
     with Lock:
         counts = (
             df.filter(pl.col("Flagged") == 1)
@@ -531,4 +544,3 @@ def approve_rows(indexes, change_same, projectid, filter_state, progress):
     with st.session_state.lock_class:
         with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "wb") as f:
             pickle.dump(progress, f)
-

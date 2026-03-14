@@ -115,8 +115,16 @@ else:
                 st.session_state["editor"]["edited_rows"] = {}
                 st.session_state["editor"]["deleted_rows"] = []
             
-            isUnique = st.checkbox("Show Unique Values Only", value=True)
-            onlyFlagged = st.checkbox("Show Only Flagged", value=True)
+            dat_fil, save_sets = st.columns(2)
+            with dat_fil:
+                st.subheader("Data Filter Settings")
+                isUnique = st.checkbox("Show Unique Values Only", value=True)
+                onlyFlagged = st.checkbox("Show Only Flagged", value=True)
+
+            with save_sets:
+                st.subheader("Save Settings")
+                change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True, key=6989685)
+            
             opts = options((565412,567489))
             filter_state = (opts[0], opts[1], isUnique, onlyFlagged)
             filter_update(filter_state)
@@ -141,10 +149,10 @@ else:
             
 
             if (time.time() - st.session_state.last_save >= SAVE_INTERVAL):
-                update_changed_df(project_id)
+                update_changed_df(project_id, change_all_same, progress)
                     
                 
-            st.button("Save Changes", on_click=update_changed_df, args=[project_id])
+            st.button("Save Changes", on_click=update_changed_df, args=[project_id, change_all_same, progress])
                 
             
 
