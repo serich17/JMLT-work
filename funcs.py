@@ -98,8 +98,10 @@ def preprocess(file, file_stem):
                 .list.unique(maintain_order=True)
                 .alias("Separated")
             )\
+            .drop("Preprocess")\
             .with_columns(
                 # create flagged column
+                pl.col("Separated").alias("Initial_separated"),
                 pl.col("Separated").list.get(-1, null_on_oob=True).alias("To_analyze"),
                 pl.lit(0).alias("Flagged"),
                 pl.lit([]).alias("Analyzed"),
@@ -118,9 +120,9 @@ def preprocess(file, file_stem):
 
 
         pro = Progress(df.shape, file_stem)
-        with st.session_state.lock_class:
-            with open(f"{dir_name}/progress.pkl", "wb") as f:
-                pickle.dump(pro, f)
+        
+        with open(f"{dir_name}/progress.pkl", "wb") as f:
+            pickle.dump(pro, f)
         
         country_check(dir_name)
 
@@ -301,9 +303,8 @@ def country_check(dir_name):
 
         df.write_parquet(f"{dir_name}/processed_data.parquet")
 
-        with st.session_state.lock_class:
-            with open(f"{dir_name}/progress.pkl", "rb") as f:
-                progress = pickle.load(f)
+        with open(f"{dir_name}/progress.pkl", "rb") as f:
+            progress = pickle.load(f)
 
         num = df.unique(["To_analyze"]).select(pl.col("Flagged").sum()).item()
         progress.set_unique_flagged(
@@ -311,9 +312,9 @@ def country_check(dir_name):
         )
         progress.set_flagged(df.select(pl.col("Flagged").sum()).item())
 
-        with st.session_state.lock_class:
-            with open(f"{dir_name}/progress.pkl", "wb") as f:
-                pickle.dump(progress, f)
+        
+        with open(f"{dir_name}/progress.pkl", "wb") as f:
+            pickle.dump(progress, f)
 
     except Exception as e:
         print(e)
@@ -354,13 +355,15 @@ def load_project(dir: str):
         df = (pl.scan_parquet(f"{PROJECTS_DIR}/{dir}/processed_data.parquet"))
     return df 
 
-def filter_prefix(lf: pl.LazyFrame, column: str, prefix: str, isUnique: bool, onlyFlagged: bool) -> pl.DataFrame:
+def filter_prefix(lf: pl.LazyFrame, column: str, prefix: str, isUnique: bool, onlyFlagged: bool, single_list: bool) -> pl.DataFrame:
     if len(prefix) > 0:
         lf = lf.filter(pl.col(column).str.to_lowercase().str.contains(prefix.lower()))
     if onlyFlagged:
         lf = lf.filter(pl.col("Flagged") == 1)
     if isUnique:
         lf = lf.unique(["To_analyze"])
+    if single_list:
+        lf = lf.filter(pl.col("Initial_separated").list.len() < 2)
     return lf
 
 
@@ -369,6 +372,7 @@ def filter_update(filter_state):
     start = filter_state[1]
     isUnique = filter_state[2]
     onlyFlagged = filter_state[3]
+    single_item = filter_state[4]
     if "last_filter_state" not in st.session_state:
         st.session_state.last_filter_state = None
     if filter_state != st.session_state.last_filter_state:
@@ -377,7 +381,8 @@ def filter_update(filter_state):
             option,
             start,
             isUnique,
-            onlyFlagged
+            onlyFlagged,
+            single_item
         ).collect(engine="streaming")
         st.session_state.last_filter_state = filter_state
 
@@ -407,7 +412,7 @@ def update_changed_df(projectid, change_same, progress):
             index_val for index_val, changes in pending.items()
             if "To_analyze" in changes
         ]
-        df = fix_flagged(indexes, df, change_same)
+        df = fix_flagged(indexes, df, False, change_same)
         with Lock:
             df = df.collect(engine="streaming")
         save_file(df, projectid)
@@ -422,7 +427,8 @@ def update_changed_df(projectid, change_same, progress):
                 st.session_state.last_filter_state[0],
                 st.session_state.last_filter_state[1],
                 st.session_state.last_filter_state[2],
-                st.session_state.last_filter_state[3]
+                st.session_state.last_filter_state[3],
+                st.session_state.last_filter_state[4]
             ).collect(streaming=True)
         update_progress(Lock, progress, projectid, df)
 
@@ -461,9 +467,9 @@ def options(keys):
             
     return (option, start)
 
-def approve_rows(indexes, change_same, projectid, filter_state, progress):
+def approve_rows(indexes, change_same, projectid, filter_state, progress, suggested, prepend):
     Lock = st.session_state.lock
-    df = fix_flagged(indexes, st.session_state.project_df, change_same)
+    df = fix_flagged(indexes, st.session_state.project_df, suggested, change_same, prepend)
 
 
     with Lock:
@@ -477,14 +483,14 @@ def approve_rows(indexes, change_same, projectid, filter_state, progress):
                 filter_state[0],
                 filter_state[1],
                 filter_state[2],
-                filter_state[3]
+                filter_state[3],
+                filter_state[4]
             ).collect(engine="streaming")
     st.session_state.last_filter_state = filter_state
 
     update_progress(Lock, progress, projectid, df)
 
-
-def fix_flagged(indexes, df, change_same):
+def fix_flagged(indexes, df, suggested, change_same, prepend=False):
     Lock = st.session_state.lock
     base_mask = pl.col("Index").is_in(indexes)
 
@@ -502,18 +508,48 @@ def fix_flagged(indexes, df, change_same):
         mask = pl.col("To_analyze").is_in(vals)
     else:
         mask = base_mask
+    
+    if prepend:
+        df = df.with_columns(
+            pl.when(mask)
+            .then(
+                pl.concat_list(
+                    "Separated",
+                    "To_analyze"
+                )
+            )
+            .otherwise(pl.col("Separated"))
+            .alias("Separated"),
+        )
+        
+    else:
+        if suggested:
+            df = df.with_columns(
+                pl.when(mask)
+                .then(
+                    pl.concat_list([
+                        pl.col("Suggested"),
+                        pl.col("Analyzed")
+                    ])
+                )
+                .otherwise(pl.col("Analyzed"))
+                .alias("Analyzed"),
+            )
+        else:
+            df = df.with_columns(
+                pl.when(mask)
+                .then(
+                    pl.concat_list([
+                        pl.col("To_analyze"),
+                        pl.col("Analyzed")
+                    ])
+                )
+                .otherwise(pl.col("Analyzed"))
+                .alias("Analyzed")
+            )
 
     df = df.with_columns(
         [
-            pl.when(mask)
-            .then(
-                pl.concat_list([
-                    pl.col("Suggested"),
-                    pl.col("Analyzed")
-                ])
-            )
-            .otherwise(pl.col("Analyzed"))
-            .alias("Analyzed"),
             pl.when(mask)
             .then(None)
             .otherwise(pl.col("To_analyze"))

@@ -4,6 +4,7 @@ class Progress:
         self.project = project
         self.flagged = 0
         self.unique_flagged = 0
+        self.curr_level = 0
 
     def get_size(self):
         return self.size
@@ -12,7 +13,7 @@ class Progress:
 
     def set_flagged(self, flagged):
         self.flagged = int(flagged)
-    
+
     def get_flagged(self):
         return self.flagged
     
@@ -21,3 +22,9 @@ class Progress:
     
     def get_unique_flagged(self):
         return self.unique_flagged
+
+    def get_curr_level(self):
+        return f"L{self.curr_level}"
+    
+    def set_curr_level(self):
+        self.curr_level += 1

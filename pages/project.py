@@ -1,8 +1,7 @@
-
+from threading import Lock
 import streamlit as st
 import polars as pl
 from funcs import *
-import threading
 import time
 
 SAVE_INTERVAL = 180  # seconds
@@ -17,11 +16,11 @@ if not project_id:
     st.button("Connect Project") and st.switch_page("main.py")
 else:
     if "lock" not in st.session_state:
-        st.session_state.lock = threading.Lock()
+        st.session_state.lock = Lock()
     if "lock_class" not in st.session_state:
-        st.session_state.lock_class = threading.Lock()
+        st.session_state.lock_class = Lock()
     if "save_lock" not in st.session_state:
-        st.session_state.save_lock = threading.Lock()
+        st.session_state.save_lock = Lock()
     Lock = st.session_state.lock
     # initialize timer
     if "last_save" not in st.session_state:
@@ -46,53 +45,61 @@ else:
         with open(f"{PROJECTS_DIR}/{project_id}/progress.pkl", "rb") as f:
             progress = pickle.load(f)
     
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Unique Flagged", f"{progress.get_unique_flagged():,}", )
-    col2.metric("Total Flagged", f"{progress.get_flagged():,}")
-    col3.metric("Project Size (Rows)", f"{progress.get_size()[0]:,}")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Unique Flagged", f"{progress.get_unique_flagged():,}", border=True)
+    col2.metric("Total Flagged", f"{progress.get_flagged():,}", border=True)
+    col3.metric("Current Admin Level", f"{progress.get_curr_level()}", border=True)
+    col4.metric("Project Size (Rows)", f"{progress.get_size()[0]:,}", border=True)
 
     approve, editor, map, export = st.tabs(["Approve Suggestions", "Data Editor", "Search Map", "Export CSV"], on_change="rerun")
 
     if approve.open:
         with approve:
+            change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True)
+            single_list = st.checkbox("Rows Containing Initial Separated List of Length 1", value=False, key=212321)
+            opts = options((21321325,56465478))
+            filter_state = (opts[0], opts[1], True, True, single_list)
+            filter_update(filter_state)
+            cols_selected = st.multiselect(
+                "Select which columns to show in table",
+                st.session_state.base_df.schema.keys(),
+                default=["Original", "To_analyze", "Suggested", "MatchScore"],
+                key = 65645165
+            )
             @st.fragment
-            def approve_code():
-                change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True)
-                opts = options((21321325,56465478))
-
-                filter_state = (opts[0], opts[1], True, True)
-                filter_update(filter_state)
-
-                cols_selected = st.multiselect(
-                    "Select which columns to show in table",
-                    st.session_state.base_df.schema.keys(),
-                    default=["Original", "To_analyze", "Suggested", "MatchScore"],
-                    key = 65645165
+            def approval_table():
+                event = st.dataframe(
+                    st.session_state.base_df,
+                    column_order=cols_selected,
+                    on_select="rerun",
+                    selection_mode=["multi-row"],
+                    width="stretch",
+                    hide_index=False
                 )
-                @st.fragment
-                def approval_table():
-                    event = st.dataframe(
-                        st.session_state.base_df,
-                        column_order=cols_selected,
-                        on_select="rerun",
-                        selection_mode=["multi-row"],
-                        width="stretch",
-                        hide_index=False
+                selected_rows = event.selection.rows
+                if len(selected_rows) > 0:
+                    selected_indexes = (
+                        st.session_state.base_df[selected_rows]        
+                        .get_column("Index")
+                        .to_list()
                     )
-                    selected_rows = event.selection.rows
-
-                    if len(selected_rows) > 0:
-                        selected_indexes = (
-                            st.session_state.base_df[selected_rows]        
-                            .get_column("Index")
-                            .to_list()
-                        )
-                        if st.button(f"Approve {len(selected_rows)} Suggestions"):
-                            approve_rows(selected_indexes, change_all_same, project_id, filter_state, progress)
+                    st.text(f"{len(selected_rows)} Rows Selected")
+                    b1, b2, b3 = st.columns(3)
+                    with b1:
+                        if st.button(f"Use Suggested"):
+                            approve_rows(selected_indexes, change_all_same, project_id, filter_state, progress, True, False)
                             st.rerun()
-                        
-                approval_table()
-            approve_code()
+                    with b2:
+                        if st.button(f"Approve As Is"):
+                            approve_rows(selected_indexes, change_all_same, project_id, filter_state, progress, False, False)
+                            st.rerun()
+                    with b3:
+                        if st.button(f"Mark Not {progress.get_curr_level()}"):
+                            approve_rows(selected_indexes, change_all_same, project_id, filter_state, progress, False, True)
+                            st.rerun()
+                    
+            approval_table()
+            
 
     if editor.open:
         with editor:
@@ -120,13 +127,14 @@ else:
                 st.subheader("Data Filter Settings")
                 isUnique = st.checkbox("Show Unique Values Only", value=True)
                 onlyFlagged = st.checkbox("Show Only Flagged", value=True)
+                single_list = st.checkbox("Rows Containing Initial Separated List of Length 1", value=False, key=212)
 
             with save_sets:
                 st.subheader("Save Settings")
                 change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True, key=6989685)
             
             opts = options((565412,567489))
-            filter_state = (opts[0], opts[1], isUnique, onlyFlagged)
+            filter_state = (opts[0], opts[1], isUnique, onlyFlagged, single_list)
             filter_update(filter_state)
             cols_selected = st.multiselect(
                 "Select which columns to show in table",
