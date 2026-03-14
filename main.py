@@ -1,6 +1,5 @@
 # Import all libraries needed
-import polars as pl
-import streamlit as st
+# import streamlit as st
 import os
 from funcs import *
 

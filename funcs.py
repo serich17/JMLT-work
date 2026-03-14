@@ -7,7 +7,6 @@ from data import Progress
 from rapidfuzz.process import cdist
 from rapidfuzz.distance import Levenshtein
 import time
-import uuid
 
 # Root directory where projects are stored
 PROJECTS_DIR = f"{os.path.dirname(os.path.abspath(__file__))}/projects"
