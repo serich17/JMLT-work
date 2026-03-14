@@ -381,40 +381,36 @@ def filter_update(filter_state):
         ).collect(engine="streaming")
         st.session_state.last_filter_state = filter_state
 
-def update_changed_df(edited_df, projectid):
+def update_changed_df(projectid):
     Lock = st.session_state.lock
-    editor_state = st.session_state["editor"]
-    edited_rows = editor_state["edited_rows"]
-    edited_rows = {
-        row_idx: {k: v for k, v in changes.items() if k != "Select"}
-        for row_idx, changes in editor_state["edited_rows"].items()
-    }
-    deleted_rows = editor_state["deleted_rows"]
-    if len(edited_rows) > 0 or len(deleted_rows):
+    with st.session_state.save_lock:
+        pending = st.session_state.pending_changes
+        deletes = st.session_state.pending_deletes
+
+        if not pending and not deletes:
+            return
+
         df = st.session_state.project_df
-        for row_pos, changes in edited_rows.items():
-            row_id = edited_df[row_pos, "Index"]
+        for index_val, changes in pending.items():
             for col, val in changes.items():
                 df = df.with_columns(
-                    pl.when(pl.col("Index") == row_id)
+                    pl.when(pl.col("Index") == index_val)
                     .then(pl.lit(val))
                     .otherwise(pl.col(col))
                     .alias(col)
                 )
+            
+        for index_val in deletes:
+            df = df.filter(pl.col("Index") != index_val)
+
         with Lock:
             df = df.collect(engine="streaming")
         save_file(df, projectid)
-        st.session_state.project_df = load_project()
-        for row_pos in deleted_rows:
-            row_id = edited_df[row_pos, "Index"]
-            df = df.filter(pl.col("Index") != row_id)
-        st.session_state.project_df = df.lazy()
-        if (time.time() - st.session_state.last_save >= SAVE_INTERVAL):
-            save_file(projectid)
-            st.session_state.project_df = load_project()
-        st.session_state.editor["edited_rows"] = {}
-        st.session_state.editor["deleted_rows"] = []
-
+        st.session_state.project_df = load_project(projectid)
+        st.session_state.pending_changes = {}
+        st.session_state.pending_deletes = set()
+        st.session_state["editor"]["edited_rows"] = {}
+        st.session_state["editor"]["deleted_rows"] = []
         with Lock:
             st.session_state.base_df = filter_prefix(
                 st.session_state.project_df,
@@ -422,8 +418,7 @@ def update_changed_df(edited_df, projectid):
                 st.session_state.last_filter_state[1],
                 st.session_state.last_filter_state[2],
                 st.session_state.last_filter_state[3]
-            ).collect(streaming=True)
-        
+            ).collect(streaming=True)        
 
 def safe_write_parquet(df, path):
     tmp = path + ".tmp"
@@ -450,7 +445,7 @@ def options(keys):
     with col1:
         start = st.text_input("Contains...", key=key3)
     with col2:
-        search_cols = list(filter(lambda x: x not in ["Index", "Flagged"], st.session_state.project_df.collect_schema()))
+        search_cols = list(filter(lambda x: x not in ["Flagged"], st.session_state.project_df.collect_schema()))
         option = st.selectbox(
             "Select a column to filter",
             search_cols,
@@ -512,7 +507,7 @@ def approve_rows(indexes, change_same, projectid, filter_state, progress):
         ).collect(engine="streaming")
 
     save_file(df, projectid)
-    st.session_state.project_df = load_project()
+    st.session_state.project_df = load_project(projectid)
     with Lock:
         st.session_state.base_df = filter_prefix(
                 st.session_state.project_df,
@@ -530,7 +525,6 @@ def approve_rows(indexes, change_same, projectid, filter_state, progress):
                 total_flagged=pl.len(),
                 unique_flagged=pl.col("To_analyze").n_unique()
             )
-            .collect()
         )
     progress.set_flagged(counts["total_flagged"][0])
     progress.set_unique_flagged(counts["unique_flagged"][0])

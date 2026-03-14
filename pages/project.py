@@ -20,6 +20,8 @@ else:
         st.session_state.lock = threading.Lock()
     if "lock_class" not in st.session_state:
         st.session_state.lock_class = threading.Lock()
+    if "save_lock" not in st.session_state:
+        st.session_state.save_lock = threading.Lock()
     Lock = st.session_state.lock
     # initialize timer
     if "last_save" not in st.session_state:
@@ -33,6 +35,12 @@ else:
 
     if "project_df" not in st.session_state:
         st.session_state["project_df"] = load_project(project_id)
+
+    # Initialize in session state
+    if "pending_changes" not in st.session_state:
+        st.session_state.pending_changes = {}  # {index_val: {col: val}}
+    if "pending_deletes" not in st.session_state:
+        st.session_state.pending_deletes = set()
     st.title(project_id)
     with st.session_state.lock_class:
         with open(f"{PROJECTS_DIR}/{project_id}/progress.pkl", "rb") as f:
@@ -79,56 +87,66 @@ else:
                             .get_column("Index")
                             .to_list()
                         )
-                        st.button(f"Approve {len(selected_rows)} Suggestions", on_click=approve_rows, args=[selected_indexes, change_all_same, project_id, filter_state, progress])
+                        if st.button(f"Approve {len(selected_rows)} Suggestions"):
+                            approve_rows(selected_indexes, change_all_same, project_id, filter_state, progress)
+                            st.rerun()
+                        
                 approval_table()
             approve_code()
 
     if editor.open:
         with editor:
-            @st.fragment
-            def editor_code():
-                isUnique = st.checkbox("Show Unique Values Only", value=True)
-                onlyFlagged = st.checkbox("Show Only Flagged", value=True)
-                opts = options((565412,567489))
+                # Translate and accumulate after every rerun
+            # Safe — returns empty dict/list if editor hasn't rendered yet
+            editor_state = st.session_state.get("editor", {})
 
-                filter_state = (opts[0], opts[1], isUnique, onlyFlagged)
-                filter_update(filter_state)
+            for row_pos, changes in editor_state.get("edited_rows", {}).items():
+                index_val = st.session_state.base_df[row_pos, "Index"]
+                if index_val not in st.session_state.pending_changes:
+                    st.session_state.pending_changes[index_val] = {}
+                st.session_state.pending_changes[index_val].update(changes)
 
-                cols_selected = st.multiselect(
-                    "Select which columns to show in table",
-                    st.session_state.base_df.schema.keys(),
-                    default=["Original", "To_analyze"]
+            for row_pos in editor_state.get("deleted_rows", []):
+                index_val = st.session_state.base_df[row_pos, "Index"]
+                st.session_state.pending_deletes.add(index_val)
+
+            # Clear after translating so they don't get re-processed next rerun
+            if "editor" in st.session_state:
+                st.session_state["editor"]["edited_rows"] = {}
+                st.session_state["editor"]["deleted_rows"] = []
+            
+            isUnique = st.checkbox("Show Unique Values Only", value=True)
+            onlyFlagged = st.checkbox("Show Only Flagged", value=True)
+            opts = options((565412,567489))
+            filter_state = (opts[0], opts[1], isUnique, onlyFlagged)
+            filter_update(filter_state)
+            cols_selected = st.multiselect(
+                "Select which columns to show in table",
+                st.session_state.base_df.schema.keys(),
+                default=["Original", "To_analyze"]
+            )
+            # print(st.session_state.base_df)
+            
+            with st.session_state.save_lock:
+                edited_df = st.data_editor(
+                    st.session_state.base_df,
+                    width="stretch",
+                    key="editor",
+                    column_order = cols_selected,
+                    column_config={"Select": st.column_config.CheckboxColumn(required=True, pinned=True)},
+                    num_rows="delete",
+                    hide_index=False,
+                    disabled=[x for x in st.session_state.base_df.columns if x not in ["To_analyze", "Separated", "Analyzed"]]
                 )
+            
 
-                # print(st.session_state.base_df)
-                @st.fragment
-                def editor_frame():
-                    edited_df = st.data_editor(
-                        st.session_state.base_df,
-                        width="stretch",
-                        key="editor",
-                        column_order = cols_selected,
-                        column_config={"Select": st.column_config.CheckboxColumn(required=True, pinned=True)},
-                        num_rows="delete",
-                        hide_index=False,
-                        disabled=[x for x in st.session_state.base_df.columns if x not in ["To_analyze", "Separated", "Analyzed"]]
-                    )
-
-
-                    # num_rows = "delete"
-                    # column_order =("one", "two")
-                    # column_config = {"col1":"Col 1"}
-                    # disabled=[cols that you can't edit]
-
-                    update_changed_df(edited_df, project_id)
-
-                    # selected_rows = edited_df.filter(pl.col("Select") == True)
-
-                    # print(selected_rows)
+            if (time.time() - st.session_state.last_save >= SAVE_INTERVAL):
+                update_changed_df(project_id)
                     
-                    st.button("Save Changes", on_click=save_file, args=[project_id])
-                editor_frame()
-            editor_code()
+                
+            st.button("Save Changes", on_click=update_changed_df, args=[project_id])
+                
+            
 
 
     with map:
