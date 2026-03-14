@@ -10,7 +10,6 @@ SAVE_INTERVAL = 180  # seconds
 project_id = st.query_params.get("project_id")
 PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROJECTS_DIR = os.path.join(PARENT_DIR, "projects")
-print("here")
 if not project_id:
     st.title("No Project Linked")
     st.button("Connect Project") and st.switch_page("main.py")
@@ -103,7 +102,7 @@ else:
 
     if editor.open:
         with editor:
-                # Translate and accumulate after every rerun
+            # Translate and accumulate after every rerun
             # Safe — returns empty dict/list if editor hasn't rendered yet
             editor_state = st.session_state.get("editor", {})
 

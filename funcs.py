@@ -289,8 +289,6 @@ def country_check(dir_name):
                 .alias("Suggested")
             ).drop("Suggested_Raw")
 
-            print("HERE")
-
             df = df.join(best_matches, on="To_analyze", how="left")
         else:
             df = df.with_columns([
