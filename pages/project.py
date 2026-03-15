@@ -54,8 +54,13 @@ else:
 
     if approve.open:
         with approve:
-            change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True)
-            single_list = st.checkbox("Rows Containing Initial Separated List of Length 1", value=False, key=212321)
+            dat_fil, save_sets = st.columns(2)
+            with dat_fil:
+                st.subheader("Data Filter Settings")
+                single_list = st.checkbox("Rows Containing Initial Separated List of Length 1", value=False, key=212321)
+            with save_sets:
+                st.subheader("Save Settings")
+                change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True)
             opts = options((21321325,56465478))
             filter_state = (opts[0], opts[1], True, True, single_list)
             filter_update(filter_state)
@@ -184,4 +189,8 @@ else:
     # # e1f = pl.scan_parquet("allCountries.parquet/**/*.parquet")\
     # #         .filter(pl.col("name_lower").str.starts_with("pla"))\
     # st.dataframe(e1f)
+
+
+    with export:
+        pass
 
