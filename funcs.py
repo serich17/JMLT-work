@@ -354,11 +354,14 @@ def load_project(dir: str):
 
 def filter_prefix(lf: pl.LazyFrame, column: str, prefix: str, isUnique: bool, onlyFlagged: bool, single_list: bool) -> pl.DataFrame:
     if len(prefix) > 0:
-        lf = lf.filter(pl.col(column).str.to_lowercase().str.contains(prefix.lower()))
+        lf = lf.filter(pl.col(column).cast(pl.String).str.to_lowercase().str.contains(prefix.lower()))
     if onlyFlagged:
         lf = lf.filter(pl.col("Flagged") == 1)
     if isUnique:
-        lf = lf.unique(["To_analyze"])
+        lf = lf.with_columns(
+            pl.col("To_analyze").count().over("To_analyze").alias("Unique Count")
+        )\
+        .unique(["To_analyze"])
     if single_list:
         lf = lf.filter(pl.col("Initial_separated").list.len() < 2)
     return lf
@@ -393,23 +396,67 @@ def update_changed_df(projectid, change_same, progress):
             return
 
         df = st.session_state.project_df
+
+          # Build a map of old To_analyze value → new value from the pending changes
+        to_analyze_map = {}
+        for index_val, changes in pending.items():
+            if "To_analyze" in changes:
+                original_val = (
+                    df.filter(pl.col("Index") == index_val)
+                    .select("To_analyze")
+                    .collect()
+                    .item()
+                )
+                to_analyze_map[original_val] = changes["To_analyze"]
+
+        if change_same:
+            # Expanded indexes = all rows that had a matching original value
+            with Lock:
+                expanded_indexes = (
+                    df.filter(pl.col("To_analyze").is_in(list(to_analyze_map.keys())))
+                    .select("Index")
+                    .collect()
+                    .to_series()
+                    .to_list()
+                )
+            
+            # Apply To_analyze changes to all rows matching the original value
+            for old_val, new_val in to_analyze_map.items():
+                df = df.with_columns(
+                    pl.when(pl.col("To_analyze") == old_val)
+                    .then(pl.lit(new_val))
+                    .otherwise(pl.col("To_analyze"))
+                    .alias("To_analyze")
+                )
+            
+        else:
+            # Only apply To_analyze changes to the original indexes
+            for index_val, changes in pending.items():
+                if "To_analyze" in changes:
+                    df = df.with_columns(
+                        pl.when(pl.col("Index") == index_val)
+                        .then(pl.lit(changes["To_analyze"]))
+                        .otherwise(pl.col("To_analyze"))
+                        .alias("To_analyze")
+                    )
+            expanded_indexes = list(pending.keys())
+
+        # Apply all other column changes only to original indexes
         for index_val, changes in pending.items():
             for col, val in changes.items():
+                if col == "To_analyze":
+                    continue
                 df = df.with_columns(
                     pl.when(pl.col("Index") == index_val)
                     .then(pl.lit(val))
                     .otherwise(pl.col(col))
                     .alias(col)
                 )
-            
+
         for index_val in deletes:
             df = df.filter(pl.col("Index") != index_val)
 
-        indexes = [
-            index_val for index_val, changes in pending.items()
-            if "To_analyze" in changes
-        ]
-        df = fix_flagged(indexes, df, False, change_same)
+        df = fix_flagged(expanded_indexes, df, False, False)  # change_same already handled above
         with Lock:
             df = df.collect(engine="streaming")
         save_file(df, projectid)

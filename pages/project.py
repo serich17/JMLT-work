@@ -102,24 +102,6 @@ else:
 
     if editor.open:
         with editor:
-            # Translate and accumulate after every rerun
-            # Safe — returns empty dict/list if editor hasn't rendered yet
-            editor_state = st.session_state.get("editor", {})
-
-            for row_pos, changes in editor_state.get("edited_rows", {}).items():
-                index_val = st.session_state.base_df[row_pos, "Index"]
-                if index_val not in st.session_state.pending_changes:
-                    st.session_state.pending_changes[index_val] = {}
-                st.session_state.pending_changes[index_val].update(changes)
-
-            for row_pos in editor_state.get("deleted_rows", []):
-                index_val = st.session_state.base_df[row_pos, "Index"]
-                st.session_state.pending_deletes.add(index_val)
-
-            # Clear after translating so they don't get re-processed next rerun
-            if "editor" in st.session_state:
-                st.session_state["editor"]["edited_rows"] = {}
-                st.session_state["editor"]["deleted_rows"] = []
             
             dat_fil, save_sets = st.columns(2)
             with dat_fil:
@@ -153,6 +135,25 @@ else:
                     hide_index=False,
                     disabled=[x for x in st.session_state.base_df.columns if x not in ["To_analyze", "Separated", "Analyzed"]]
                 )
+            
+            # Translate and accumulate after every rerun
+            # Safe — returns empty dict/list if editor hasn't rendered yet
+            editor_state = st.session_state.get("editor", {})
+
+            for row_pos, changes in editor_state.get("edited_rows", {}).items():
+                index_val = st.session_state.base_df[row_pos, "Index"]
+                if index_val not in st.session_state.pending_changes:
+                    st.session_state.pending_changes[index_val] = {}
+                st.session_state.pending_changes[index_val].update(changes)
+
+            for row_pos in editor_state.get("deleted_rows", []):
+                index_val = st.session_state.base_df[row_pos, "Index"]
+                st.session_state.pending_deletes.add(index_val)
+
+            # Clear after translating so they don't get re-processed next rerun
+            if "editor" in st.session_state:
+                st.session_state["editor"]["edited_rows"] = {}
+                st.session_state["editor"]["deleted_rows"] = []
             
 
             if (time.time() - st.session_state.last_save >= SAVE_INTERVAL):
