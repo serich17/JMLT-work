@@ -169,28 +169,56 @@ else:
                 
             
 
-
-    with map:
-        df = st.session_state["allPlaces"]
-        number = st.slider("Number of results to show on map", 100, 10000, step=10)
-        mapped = st.text_input("Contains...", key=15654564564)
-        
-        with Lock:
-            df = df.drop_nulls(subset=["latitude", "longitude"]).filter(pl.col("name_lower").str.contains(mapped.lower())).limit(number).with_columns([
-                pl.col("latitude").cast(pl.Float64, strict=False),
-                pl.col("longitude").cast(pl.Float64, strict=False)
-            ]).collect()
-        # # 3. Drop rows where coordinates are now null (optional but recommended)
-        # df = df.drop_nulls(subset=["latitude", "longitude"]).collect()
-        # # 4. Streamlit's st.map still prefers a Pandas DataFrame or a specific format, 
-        # # so we convert it back just for the map rendering.
-        st.map(df)
-    # e1f = pl.scan_parquet(f"{PROJECTS_DIR}/{project_id}/processed_data.parquet")
-    # # e1f = pl.scan_parquet("allCountries.parquet/**/*.parquet")\
-    # #         .filter(pl.col("name_lower").str.starts_with("pla"))\
-    # st.dataframe(e1f)
-
-
-    with export:
-        pass
-
+    if map.open:
+        with map:
+            df = st.session_state["allPlaces"]
+            number = st.slider("Number of results to show on map", 100, 10000, step=10)
+            mapped = st.text_input("Contains...", key=15654564564)
+            
+            data_load_state = st.text('Loading map...')
+            with Lock:
+                df = df.drop_nulls(subset=["latitude", "longitude"]).filter(pl.col("name_lower").str.contains(mapped.lower())).limit(number).with_columns([
+                    pl.col("latitude").cast(pl.Float64, strict=False),
+                    pl.col("longitude").cast(pl.Float64, strict=False)
+                ]).collect()
+            
+            st.map(df)
+            data_load_state.text("Done!")
+                
+       
+            
+    if export.open:
+        with export:
+            @st.fragment
+            def export_tab():
+                st.header("Export the CSV")
+                st.text("This export function will combine the original Folder Name column with the items in the Analyzed column into a single exported CSV, more for the final product")
+                st.text("If you want to export something else, use the built in export csv in the tables and select the columns you want")
+                if st.button("Prepare Export"):
+                    # 1. Get the LazyFrame
+                    lf = st.session_state.project_df
+                    
+                    # 2. Materialize to a DataFrame to calculate max width and for downloading
+                    df = lf.collect()
+                    
+                    # 3. Calculate max width (must be done on a collected DF or via a separate aggregation)
+                    max_width = df.select(pl.col("Analyzed").list.len().max()).item()
+                    
+                    # 4. Expand the list column
+                    # Note: Using .unnest("Analyzed") to match your column name
+                    expanded = (
+                        df.select(["Folder Name", "Analyzed"])
+                        .with_columns(
+                            pl.col("Analyzed").list.to_struct(upper_bound=max_width)
+                        )
+                        .unnest("Analyzed")
+                    )
+                    
+                    # 5. Provide the download button
+                    st.download_button(
+                        label="Download CSV",
+                        data=expanded.write_csv(),
+                        file_name="output.csv",
+                        mime="text/csv"
+                    )
+            export_tab()
