@@ -50,17 +50,18 @@ else:
     col3.metric("Current Admin Level", f"{progress.get_curr_level()}", border=True)
     col4.metric("Project Size (Rows)", f"{progress.get_size()[0]:,}", border=True)
 
-    approve, editor, map, export = st.tabs(["Approve Suggestions", "Data Editor", "Search Map", "Export CSV"], on_change="rerun")
+    approve, editor, map, next_admin, export = st.tabs(["Approve Suggestions", "Data Editor", "Search Map", "Next Admin", "Export CSV"], on_change="rerun")
 
     if approve.open:
         with approve:
-            dat_fil, save_sets = st.columns(2)
-            with dat_fil:
-                st.subheader("Data Filter Settings")
-                single_list = st.checkbox("Rows Containing Initial Separated List of Length 1", value=False, key=212321)
-            with save_sets:
-                st.subheader("Save Settings")
-                change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True)
+            with st.expander("Filter Options"):
+                dat_fil, save_sets = st.columns(2)
+                with dat_fil:
+                    st.subheader("Data Filter Settings")
+                    single_list = st.checkbox("Rows Containing Initial Separated List of Length 1", value=False, key=212321)
+                with save_sets:
+                    st.subheader("Save Settings")
+                    change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True)
             opts = options((21321325,56465478))
             filter_state = (opts[0], opts[1], True, True, single_list)
             filter_update(filter_state)
@@ -93,9 +94,14 @@ else:
                         if st.button(f"Use Suggested"):
                             approve_rows(selected_indexes, change_all_same, project_id, filter_state, progress, True, False)
                             st.rerun()
+                        replace_with = st.text_input(label="", label_visibility="collapsed")
+                        
                     with b2:
                         if st.button(f"Approve As Is"):
                             approve_rows(selected_indexes, change_all_same, project_id, filter_state, progress, False, False)
+                            st.rerun()
+                        if st.button("Replace Selected With") and len(replace_with) > 0:
+                            approve_rows(selected_indexes, change_all_same, project_id, filter_state, progress, False, False, True, replace_with)
                             st.rerun()
                     with b3:
                         if st.button(f"Mark Not {progress.get_curr_level()}"):
@@ -107,17 +113,17 @@ else:
 
     if editor.open:
         with editor:
-            
-            dat_fil, save_sets = st.columns(2)
-            with dat_fil:
-                st.subheader("Data Filter Settings")
-                isUnique = st.checkbox("Show Unique Values Only", value=True)
-                onlyFlagged = st.checkbox("Show Only Flagged", value=True)
-                single_list = st.checkbox("Rows Containing Initial Separated List of Length 1", value=False, key=212)
+            with st.expander("Filter Options"):
+                dat_fil, save_sets = st.columns(2)
+                with dat_fil:
+                    st.subheader("Data Filter Settings")
+                    isUnique = st.checkbox("Show Unique Values Only", value=True)
+                    onlyFlagged = st.checkbox("Show Only Flagged", value=True)
+                    single_list = st.checkbox("Rows Containing Initial Separated List of Length 1", value=False, key=212)
 
-            with save_sets:
-                st.subheader("Save Settings")
-                change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True, key=6989685)
+                with save_sets:
+                    st.subheader("Save Settings")
+                    change_all_same = st.checkbox("Apply Changes to Duplicate Values in To_analyze", value=True, key=6989685)
             
             opts = options((565412,567489))
             filter_state = (opts[0], opts[1], isUnique, onlyFlagged, single_list)
@@ -171,21 +177,38 @@ else:
 
     if map.open:
         with map:
-            df = st.session_state["allPlaces"]
+            st.text("This lookup uses the allplaces database, and filters to the Admin codes listed below.")
             number = st.slider("Number of results to show on map", 100, 10000, step=10)
-            mapped = st.text_input("Contains...", key=15654564564)
+            df = prep_df_map()
             
             data_load_state = st.text('Loading map...')
             with Lock:
-                df = df.drop_nulls(subset=["latitude", "longitude"]).filter(pl.col("name_lower").str.contains(mapped.lower())).limit(number).with_columns([
+                df = df.limit(number).with_columns([
                     pl.col("latitude").cast(pl.Float64, strict=False),
                     pl.col("longitude").cast(pl.Float64, strict=False)
                 ]).collect()
-            
-            st.map(df)
+                co = pl.scan_parquet("country/*/*.parquet").with_columns(pl.col("ISO").alias("country_code")).select("Country", "country_code").collect()
+                df = df.join(co, on="country_code", how="left")
+            if len(df) > 0:
+                st.map(df)
+            else:
+                st.warning("No results found")
             data_load_state.text("Done!")
+            st.dataframe(df.select("name", "asciiname", "alternatenames", "feature_code", "Country"))
                 
-       
+    if next_admin.open:
+        with next_admin:
+            st.text("This tab is for moving on to the next admin level, and running checks in the databases, and doing match scores with rapidfuzz")
+            st.warning("Only move to the next level after there are no more flagged rows in the current level")
+
+            st.header("Settings")
+            transition_next_admin_settings(project_id)
+
+            
+
+
+
+
             
     if export.open:
         with export:

@@ -42,7 +42,7 @@ def preprocess(file, file_stem):
         pat_phrase_repeat = re.compile(r"(\b[a-zA-Z\s]{5,}\b),\s+(\1)(?!,)", re.I) # if a word repeats itself, but the second match doesn't have a comma, replace the whole thing with the first
         pat_period = re.compile(r"(?i)(?:\.(?![a-z]\s)|(?<=\.[a-z])\s)(?=[^.]{3,}(?:\.|$))") # replace all periods that have three or more characters inbetween with a comma
 
-        df = pl.read_csv(file)\
+        df = pl.read_csv(file, encoding="utf8-lossy")\
             .with_row_index("Index")\
             .with_columns(
                 pl.col("Location Original Text")
@@ -268,7 +268,7 @@ def country_check(dir_name):
         )
 
         queries = flagged_df["To_analyze"].to_list()
-        choices = co["alternateName"].to_list()
+        choices = co["alternateName"].unique().to_list()
 
         print (f"Queries {len(queries)}, Choices {len(choices)}")
 
@@ -341,7 +341,7 @@ def load_countries():
 @st.cache_resource
 def load_places():
     return pl.scan_parquet(
-        "allCountries/*/*.parquet"
+        "allCountries/*/*.parquet", hive_partitioning=True
     )\
     .filter(pl.col("feature_class").is_in(["P", "A"]))
 
@@ -511,9 +511,9 @@ def options(keys):
             
     return (option, start)
 
-def approve_rows(indexes, change_same, projectid, filter_state, progress, suggested, prepend):
+def approve_rows(indexes, change_same, projectid, filter_state, progress, suggested, prepend, swap=False, swap_val=""):
     Lock = st.session_state.lock
-    df = fix_flagged(indexes, st.session_state.project_df, suggested, change_same, prepend)
+    df = fix_flagged(indexes, st.session_state.project_df, suggested, change_same, prepend, swap, swap_val)
 
 
     with Lock:
@@ -534,7 +534,7 @@ def approve_rows(indexes, change_same, projectid, filter_state, progress, sugges
 
     update_progress(Lock, progress, projectid, df)
 
-def fix_flagged(indexes, df, suggested, change_same, prepend=False):
+def fix_flagged(indexes, df, suggested, change_same, prepend, swap, swap_val):
     Lock = st.session_state.lock
     base_mask = pl.col("Index").is_in(indexes)
 
@@ -553,6 +553,16 @@ def fix_flagged(indexes, df, suggested, change_same, prepend=False):
     else:
         mask = base_mask
     
+    if swap:
+        df = df.with_columns(
+            pl.when(mask)
+            .then(
+                pl.lit(swap_val)
+            )
+            .otherwise(pl.col("To_analyze"))
+            .alias("To_analyze")
+        )
+
     if prepend:
         df = df.with_columns(
             pl.when(mask)
@@ -621,6 +631,162 @@ def update_progress(Lock, progress, projectid, df):
         )
     progress.set_flagged(counts["total_flagged"][0])
     progress.set_unique_flagged(counts["unique_flagged"][0])
+    with st.session_state.lock_class:
+        with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "wb") as f:
+            pickle.dump(progress, f)
+
+def prep_df_map():
+    df = st.session_state["allPlaces"]
+    levels = ["ADM1", "ADM2", "ADM3", "ADM4", "ADM5", "ADMD", "PPL", "PPLA", "PPLA2", "PPLA3", "PPLA4", "PPLA5", "PPLC", "PPLF", "PPLL", "PPLR", "PPLS", "PPLX", "STLMT"]
+    with st.expander("Filter Options"):
+        admins = st.multiselect(
+            "Administrative Level Codes",
+            options= levels,
+            default= levels,
+        )
+        st.markdown("[Admin Code Lookup](https://www.geonames.org/export/codes.html)")
+    par1, par2 = st.columns(2)
+    with par1:
+        type_search = st.selectbox(
+            "Search Type",
+            ["Starts With", "Ends With", "Contains", "Exact Match"],
+            index= 3
+        )
+    with par2:
+        mapped = st.text_input("Search Key", key=15654564564)
+    df = df.drop_nulls(subset=["latitude", "longitude"]).filter(pl.col("feature_code").is_in(admins))
+    match type_search:
+        case "Starts With":
+            df = df.filter(pl.col("name_lower").str.starts_with(mapped.lower()))
+        case "Ends With":
+            df = df.filter(pl.col("name_lower").str.ends_with(mapped.lower()))
+        case "Contains":
+            df = df.filter(pl.col("name_lower").str.contains(mapped.lower()))
+        case "Exact Match":
+            df = df.filter(pl.col("name_lower") == (mapped.lower()))
+    return df
+
+
+
+def transition_next_admin_settings(project_id):
+    levels = ["ADM1", "ADM2", "ADM3", "ADM4", "ADM5", "ADMD", "PPL", "PPLA", "PPLA2", "PPLA3", "PPLA4", "PPLA5", "PPLC", "PPLF", "PPLL", "PPLR", "PPLS", "PPLX", "STLMT"]
+    with st.expander("Filter Options"):
+        st.text("Set how small to filter the checking database to")
+        st.warning("If the set is too big, it will overwhelm the ram and cpu with the rapidfuzz checks")
+        admins = st.multiselect(
+            "Administrative Level Codes",
+            options= levels,
+            default= [],
+        )
+        st.markdown("[Admin Code Lookup](https://www.geonames.org/export/codes.html)")
+
+
+    st.session_state.transition_state = (admins, 5)
+    if len(admins) > 0:
+        st.button("Next transition", on_click=next_admin_transition, args=[project_id])
+
+
+def next_admin_transition(projectid):
+    state = st.session_state.transition_state
+    project = st.session_state.project_df
+    admin_db = st.session_state.allPlaces\
+        .filter(pl.col("feature_code").is_in(state[0])).select(pl.col("name")).collect(engine="streaming")["name"]
+    admin_db = {x.lower():x for x in admin_db.to_list()}
+    with st.session_state.lock_class:
+        with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "rb") as f:
+            progress = pickle.load(f)
+
+    
+
+
+
+    df = project\
+        .with_columns(
+            # When to_analyze is none so if someone does it before everything is analyzed on the previous it won't overwrite them
+            pl.lit(1).alias("Flagged"),
+            pl.when(pl.col("To_analyze").is_null())
+            .then(pl.col("Separated").list.get(-1, null_on_oob=True))
+            .otherwise(pl.col("To_analyze"))
+            .alias("To_analyze")
+        )\
+        .with_columns(
+            pl.col("Separated").list.slice(0, pl.col("Separated").list.len() - 1).alias("Separated"),
+            pl.col("To_analyze")\
+                .str.to_lowercase()\
+                .replace(admin_db, default=pl.col("To_analyze")).alias("To_analyze")
+        )\
+        .with_columns(
+            pl.when(pl.col("To_analyze").str.to_lowercase().is_in(admin_db))
+            .then(pl.lit(0))
+            .otherwise(pl.col("Flagged"))
+            .alias("Flagged")
+        )\
+        .with_columns(
+            Analyzed = pl.when(pl.col("Flagged") == 0)
+                    .then(
+                        pl.concat_list([
+                            pl.col("To_analyze").cast(pl.List(pl.Utf8)), 
+                            pl.col("Analyzed").fill_null([])
+                        ])
+                    )
+                    .otherwise(pl.col("Analyzed")),
+            
+        )\
+        .with_columns(
+            To_analyze = pl.when(pl.col("Flagged") == 0)
+                .then(None).otherwise(pl.col("To_analyze"))
+        )
+
+        # .with_columns(
+        #     pl.when(pl.col("Flagged") == 0 & pl.col("To_analyze").is_not_null())
+        #     .then()
+        # )\
+
+
+    flagged_df = (
+            df.filter(pl.col("Flagged") == 1)
+            .select("To_analyze")
+            .unique()
+        ).collect()
+
+    queries = flagged_df["To_analyze"].to_list()
+    choices = list(admin_db.values())
+
+    print (f"Queries {len(queries)}, Choices {len(choices)}")
+
+    if queries:
+        mat = cdist(queries, choices, scorer=Levenshtein.normalized_similarity, workers=-1, scorer_kwargs={"weights":(3,1,5)})
+        max_idx = mat.argmax(axis=1)
+        max_score = mat.max(axis=1)
+        best_matches = pl.DataFrame({
+            "To_analyze": queries,
+            "Suggested_Raw": [choices[i] for i in max_idx],
+            "MatchScore": max_score,
+        })
+        best_matches = best_matches.with_columns(
+            pl.when(pl.col("MatchScore") >= 0)
+            .then(pl.col("Suggested_Raw"))
+            .otherwise(None)
+            .alias("Suggested")
+        ).drop("Suggested_Raw")
+        df = df.join(best_matches.lazy(), on="To_analyze", how="left")
+    else:
+        df = df.with_columns([
+            pl.lit(None).alias("Suggested"),
+            pl.lit(0.0).alias("MatchScore")
+        ])
+
+    df = df.collect(engine="streaming")
+
+    save_file(df, projectid)
+
+    num = df.unique(["To_analyze"]).select(pl.col("Flagged").sum()).item()
+    progress.set_unique_flagged(
+        num
+    )
+    progress.set_flagged(df.select(pl.col("Flagged").sum()).item())
+    progress.set_curr_level()
+
     with st.session_state.lock_class:
         with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "wb") as f:
             pickle.dump(progress, f)
