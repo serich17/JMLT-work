@@ -344,7 +344,7 @@ def load_countries():
 @st.cache_resource
 def load_places():
     return pl.scan_parquet(
-        "allCountries2/*/*.parquet", hive_partitioning=True
+        "allCountries/*/*.parquet", hive_partitioning=True
     )\
     .filter(pl.col("feature_class").is_in(["P", "A"]))
 
@@ -693,7 +693,7 @@ def transition_next_admin_settings(project_id):
             with open(f"projects/{project_id}/progress.pkl", "rb") as f:
                 pro = pickle.load(f)
             row_count = st.session_state.allPlaces\
-                .filter(pl.col("feature_code").is_in(st.session_state.transition_state[0])).select(pl.col("alternateName")).select(pl.count()).collect().item()
+                .filter(pl.col("feature_code").is_in(st.session_state.transition_state[0])).select(pl.col("name")).select(pl.count()).collect().item()
             st.text(f"df: {row_count} X flagged: {pro.get_unique_flagged()} = {pro.get_unique_flagged()*row_count:,}")
 
         if len(admins) > 0:
@@ -709,7 +709,7 @@ def transition_next_admin_settings(project_id):
 
 def next_admin_transition(projectid):
     project = st.session_state.project_df
-    admin_db = st.session_state.allPlaces.select(pl.col("alternateName")).collect(engine="streaming")["alternateName"].str.to_lowercase()
+    admin_db = st.session_state.allPlaces.select(pl.col("name")).collect(engine="streaming")["name"].str.to_lowercase()
     with st.session_state.lock_class:
         with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "rb") as f:
             progress = pickle.load(f)
@@ -779,7 +779,7 @@ def matcher(projectid):
     state = st.session_state.transition_state
     df = st.session_state.project_df
     admin_db = st.session_state.allPlaces\
-        .filter(pl.col("feature_code").is_in(state[0])).select(pl.col("alternateName")).collect(engine="streaming")["alternateName"]
+        .filter(pl.col("feature_code").is_in(state[0])).select(pl.col("name")).collect(engine="streaming")["name"]
     admin_db = {x.lower():x for x in admin_db.to_list()}
     flagged_df = (
             df.filter(pl.col("Flagged") == 1)
