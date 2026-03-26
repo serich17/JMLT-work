@@ -228,6 +228,9 @@ def country_check(dir_name):
 
         df = pl.scan_parquet(f"{dir_name}/processed_data.parquet")
         # co = pl.read_parquet("country.parquet/**/*.parquet")
+        print("right here")
+        # places = st.session_state.allPlaces.select("alternateName").collect(engine="streaming").to_series()
+        # print(places.limit(5))
 
         co = st.session_state.countries
 
@@ -273,7 +276,7 @@ def country_check(dir_name):
         print (f"Queries {len(queries)}, Choices {len(choices)}")
 
         if queries:
-            mat = cdist(queries, choices, scorer=Levenshtein.normalized_similarity, workers=-1, scorer_kwargs={"weights":(3,1,5)})
+            mat = cdist(queries, choices, scorer=Levenshtein.normalized_similarity, workers=-1, scorer_kwargs={"weights":(3,1,2)})
             max_idx = mat.argmax(axis=1)
             max_score = mat.max(axis=1)
             best_matches = pl.DataFrame({
@@ -341,7 +344,7 @@ def load_countries():
 @st.cache_resource
 def load_places():
     return pl.scan_parquet(
-        "allCountries/*/*.parquet", hive_partitioning=True
+        "allCountries2/*/*.parquet", hive_partitioning=True
     )\
     .filter(pl.col("feature_class").is_in(["P", "A"]))
 
@@ -456,7 +459,7 @@ def update_changed_df(projectid, change_same, progress):
         for index_val in deletes:
             df = df.filter(pl.col("Index") != index_val)
 
-        df = fix_flagged(expanded_indexes, df, False, False)  # change_same already handled above
+        df = fix_flagged(expanded_indexes, df, False, False, False, False, "")  # change_same already handled above
         with Lock:
             df = df.collect(engine="streaming")
         save_file(df, projectid)
@@ -549,7 +552,12 @@ def fix_flagged(indexes, df, suggested, change_same, prepend, swap, swap_val):
                 .to_list()
             )
 
-        mask = pl.col("To_analyze").is_in(vals)
+        matched_indexes = df.filter(pl.col("To_analyze").is_in(vals))\
+            .select("Index")\
+            .collect()\
+            .to_series()\
+            .to_list()
+        mask = pl.col("Index").is_in(matched_indexes)
     else:
         mask = base_mask
     
@@ -670,7 +678,7 @@ def prep_df_map():
 
 def transition_next_admin_settings(project_id):
     levels = ["ADM1", "ADM2", "ADM3", "ADM4", "ADM5", "ADMD", "PPL", "PPLA", "PPLA2", "PPLA3", "PPLA4", "PPLA5", "PPLC", "PPLF", "PPLL", "PPLR", "PPLS", "PPLX", "STLMT"]
-    with st.expander("Filter Options"):
+    with st.expander("String matcher"):
         st.text("Set how small to filter the checking database to")
         st.warning("If the set is too big, it will overwhelm the ram and cpu with the rapidfuzz checks")
         admins = st.multiselect(
@@ -678,26 +686,32 @@ def transition_next_admin_settings(project_id):
             options= levels,
             default= [],
         )
+        st.session_state.transition_state = (admins, 5)
+        if st.button("Check sizes"):
+            with open(f"projects/{project_id}/progress.pkl", "rb") as f:
+                pro = pickle.load(f)
+            row_count = st.session_state.allPlaces\
+                .filter(pl.col("feature_code").is_in(st.session_state.transition_state[0])).select(pl.col("alternateName")).select(pl.count()).collect().item()
+            st.text(f"df: {row_count} X flagged: {pro.get_unique_flagged()} = {pro.get_unique_flagged()*row_count:,}")
+
+        if len(admins) > 0:
+            st.button("Run matcher", on_click=matcher, args=[project_id])
         st.markdown("[Admin Code Lookup](https://www.geonames.org/export/codes.html)")
-
-
-    st.session_state.transition_state = (admins, 5)
-    if len(admins) > 0:
+    with st.expander("Increase Admin level/refill To_analyze"):
+        st.text("Move to next admin level, and pull the next item on the queue out of Separated and onto To_analyze")
+        st.text("When it pulls out the next item, it will check if it is in the places database, and if so it will automatically put it in Analyzed")
         st.button("Next transition", on_click=next_admin_transition, args=[project_id])
+        pass
+
+    st.session_state.transition_state = (admins, 5) # 5 is unneeded
 
 
 def next_admin_transition(projectid):
-    state = st.session_state.transition_state
     project = st.session_state.project_df
-    admin_db = st.session_state.allPlaces\
-        .filter(pl.col("feature_code").is_in(state[0])).select(pl.col("name")).collect(engine="streaming")["name"]
-    admin_db = {x.lower():x for x in admin_db.to_list()}
+    admin_db = st.session_state.allPlaces.select(pl.col("alternateName")).collect(engine="streaming")["alternateName"].str.to_lowercase()
     with st.session_state.lock_class:
         with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "rb") as f:
             progress = pickle.load(f)
-
-    
-
 
 
     df = project\
@@ -711,9 +725,9 @@ def next_admin_transition(projectid):
         )\
         .with_columns(
             pl.col("Separated").list.slice(0, pl.col("Separated").list.len() - 1).alias("Separated"),
-            pl.col("To_analyze")\
-                .str.to_lowercase()\
-                .replace(admin_db, default=pl.col("To_analyze")).alias("To_analyze")
+            # pl.col("To_analyze")\
+            #     .str.to_lowercase()\
+            #     .replace(admin_db, default=pl.col("To_analyze")).alias("To_analyze")
         )\
         .with_columns(
             pl.when(pl.col("To_analyze").str.to_lowercase().is_in(admin_db))
@@ -743,6 +757,28 @@ def next_admin_transition(projectid):
         # )\
 
 
+    df = df.collect(engine="streaming")
+
+    save_file(df, projectid)
+
+    num = df.unique(["To_analyze"]).select(pl.col("Flagged").sum()).item()
+    progress.set_unique_flagged(
+        num
+    )
+    progress.set_flagged(df.select(pl.col("Flagged").sum()).item())
+    progress.set_curr_level()
+
+    with st.session_state.lock_class:
+        with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "wb") as f:
+            pickle.dump(progress, f)
+
+
+def matcher(projectid):
+    state = st.session_state.transition_state
+    df = st.session_state.project_df
+    admin_db = st.session_state.allPlaces\
+        .filter(pl.col("feature_code").is_in(state[0])).select(pl.col("alternateName")).collect(engine="streaming")["alternateName"]
+    admin_db = {x.lower():x for x in admin_db.to_list()}
     flagged_df = (
             df.filter(pl.col("Flagged") == 1)
             .select("To_analyze")
@@ -769,7 +805,7 @@ def next_admin_transition(projectid):
             .otherwise(None)
             .alias("Suggested")
         ).drop("Suggested_Raw")
-        df = df.join(best_matches.lazy(), on="To_analyze", how="left")
+        df = df.drop(["Suggested", "MatchScore"]).join(best_matches.lazy(), on="To_analyze", how="left")
     else:
         df = df.with_columns([
             pl.lit(None).alias("Suggested"),
@@ -779,14 +815,3 @@ def next_admin_transition(projectid):
     df = df.collect(engine="streaming")
 
     save_file(df, projectid)
-
-    num = df.unique(["To_analyze"]).select(pl.col("Flagged").sum()).item()
-    progress.set_unique_flagged(
-        num
-    )
-    progress.set_flagged(df.select(pl.col("Flagged").sum()).item())
-    progress.set_curr_level()
-
-    with st.session_state.lock_class:
-        with open(f"{PROJECTS_DIR}/{projectid}/progress.pkl", "wb") as f:
-            pickle.dump(progress, f)
