@@ -94,7 +94,7 @@ else:
                         if st.button(f"Use Suggested"):
                             approve_rows(selected_indexes, change_all_same, project_id, filter_state, progress, True, False)
                             st.rerun()
-                        replace_with = st.text_input(label="", label_visibility="collapsed")
+                        replace_with = st.text_input(label="Replace with", label_visibility="collapsed")
                         
                     with b2:
                         if st.button(f"Approve As Is"):

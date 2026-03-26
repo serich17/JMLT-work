@@ -645,12 +645,13 @@ def update_progress(Lock, progress, projectid, df):
 
 def prep_df_map():
     df = st.session_state["allPlaces"]
-    levels = ["ADM1", "ADM2", "ADM3", "ADM4", "ADM5", "ADMD", "PPL", "PPLA", "PPLA2", "PPLA3", "PPLA4", "PPLA5", "PPLC", "PPLF", "PPLL", "PPLR", "PPLS", "PPLX", "STLMT"]
+    levels_default = ["ADM1", "ADM2", "ADM3", "ADM4", "ADM5", "ADMD", "PPL", "PPLA", "PPLA2", "PPLA3", "PPLA4", "PPLA5", "PPLC", "PPLF", "PPLL", "PPLR", "PPLS", "PPLX", "STLMT"]
+    levels1 = ["ADM1","ADM1H","ADM2","ADM2H","ADM3","ADM3H","ADM4","ADM4H","ADM5","ADM5H","ADMD","ADMDH","LTER","PCL","PCLD","PCLF","PCLH","PCLI","PCLIX","PCLS","PRSH","TERR","ZN","ZNB","PPL","PPLA","PPLA2","PPLA3","PPLA4","PPLA5","PPLC","PPLCH","PPLF","PPLG","PPLH","PPLL","PPLQ","PPLR","PPLS","PPLW","PPLX","STLMT"]
     with st.expander("Filter Options"):
         admins = st.multiselect(
             "Administrative Level Codes",
-            options= levels,
-            default= levels,
+            options= levels1,
+            default= levels_default,
         )
         st.markdown("[Admin Code Lookup](https://www.geonames.org/export/codes.html)")
     par1, par2 = st.columns(2)
@@ -677,7 +678,8 @@ def prep_df_map():
 
 
 def transition_next_admin_settings(project_id):
-    levels = ["ADM1", "ADM2", "ADM3", "ADM4", "ADM5", "ADMD", "PPL", "PPLA", "PPLA2", "PPLA3", "PPLA4", "PPLA5", "PPLC", "PPLF", "PPLL", "PPLR", "PPLS", "PPLX", "STLMT"]
+    levels = ["ADM1","ADM1H","ADM2","ADM2H","ADM3","ADM3H","ADM4","ADM4H","ADM5","ADM5H","ADMD","ADMDH","LTER","PCL","PCLD","PCLF","PCLH","PCLI","PCLIX","PCLS","PRSH","TERR","ZN","ZNB","PPL","PPLA","PPLA2","PPLA3","PPLA4","PPLA5","PPLC","PPLCH","PPLF","PPLG","PPLH","PPLL","PPLQ","PPLR","PPLS","PPLW","PPLX","STLMT"]
+    # levels = ["ADM1", "ADM2", "ADM3", "ADM4", "ADM5", "ADMD", "PPL", "PPLA", "PPLA2", "PPLA3", "PPLA4", "PPLA5", "PPLC", "PPLF", "PPLL", "PPLR", "PPLS", "PPLX", "STLMT"]
     with st.expander("String matcher"):
         st.text("Set how small to filter the checking database to")
         st.warning("If the set is too big, it will overwhelm the ram and cpu with the rapidfuzz checks")
@@ -701,7 +703,6 @@ def transition_next_admin_settings(project_id):
         st.text("Move to next admin level, and pull the next item on the queue out of Separated and onto To_analyze")
         st.text("When it pulls out the next item, it will check if it is in the places database, and if so it will automatically put it in Analyzed")
         st.button("Next transition", on_click=next_admin_transition, args=[project_id])
-        pass
 
     st.session_state.transition_state = (admins, 5) # 5 is unneeded
 
@@ -725,6 +726,7 @@ def next_admin_transition(projectid):
         )\
         .with_columns(
             pl.col("Separated").list.slice(0, pl.col("Separated").list.len() - 1).alias("Separated"),
+            pl.when(pl.col("To_analyze").is_null()).then(pl.lit(0)).otherwise(pl.col("Flagged")).alias("Flagged")
             # pl.col("To_analyze")\
             #     .str.to_lowercase()\
             #     .replace(admin_db, default=pl.col("To_analyze")).alias("To_analyze")
