@@ -215,29 +215,42 @@ else:
             @st.fragment
             def export_tab():
                 st.header("Export the CSV")
-                st.text("This export function will combine the original Folder Name column with the items in the Analyzed column into a single exported CSV, more for the final product")
+                st.text("This export function will combine the original Folder Name column with Separated, To_analyze, and Analyzed into a single exported CSV")
                 st.text("If you want to export something else, use the built in export csv in the tables and select the columns you want")
                 if st.button("Prepare Export"):
                     # 1. Get the LazyFrame
                     lf = st.session_state.project_df
                     
-                    # 2. Materialize to a DataFrame to calculate max width and for downloading
+                    # 2. Materialize to a DataFrame
                     df = lf.collect()
                     
-                    # 3. Calculate max width (must be done on a collected DF or via a separate aggregation)
-                    max_width = df.select(pl.col("Analyzed").list.len().max()).item()
-                    
-                    # 4. Expand the list column
-                    # Note: Using .unnest("Analyzed") to match your column name
-                    expanded = (
-                        df.select(["Folder Name", "Analyzed"])
+                    # 3. Create a combined column that joins Separated, To_analyze, and Analyzed
+                    combined = (
+                        df.select(["Folder Name", "Separated", "To_analyze", "Analyzed"])
                         .with_columns(
-                            pl.col("Analyzed").list.to_struct(upper_bound=max_width)
+                            pl.struct("Separated", "To_analyze", "Analyzed")
+                            .map_elements(
+                                lambda row: row["Separated"] + [row["To_analyze"]] + row["Analyzed"],
+                                return_dtype=pl.List(pl.Utf8)
+                            )
+                            .alias("Combined_Items")
                         )
-                        .unnest("Analyzed")
+                        .select(["Folder Name", "Combined_Items"])
                     )
                     
-                    # 5. Provide the download button
+                    # 4. Calculate max width for expanding the list
+                    max_width = combined.select(pl.col("Combined_Items").list.len().max()).item()
+                    
+                    # 5. Expand the combined list column
+                    expanded = (
+                        combined
+                        .with_columns(
+                            pl.col("Combined_Items").list.to_struct(upper_bound=max_width)
+                        )
+                        .unnest("Combined_Items")
+                    )
+                    
+                    # 6. Provide the download button
                     st.download_button(
                         label="Download CSV",
                         data=expanded.write_csv(),
